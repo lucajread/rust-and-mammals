@@ -1,0 +1,3088 @@
+---
+title: "Myrtle Rust Risk Assessment"
+format: html
+editor: visual
+---
+
+```{r}
+library(data.table)
+library(sf)
+library(tidyverse)
+library(raster)
+library(terra)
+library(ggspatial)
+library(ggtext)
+library(patchwork)
+library(classInt)
+library(RColorBrewer)
+library(gt)
+library(webshot2)
+library(flextable)
+library(officer)
+library(viridisLite)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(scales)
+library(prioritizr)
+library(gurobi)
+```
+
+# Susceptibility Map
+
+This portion of the work adapts <https://github.com/meryltheng/carbon-contribution.git> to produce a national "susceptibility map" by approximating the host density for the Australian National Vegetation Information System's (NVIS) Major Vegetation Groups (MVG) and Major Vegetation Subgroups (MVS). To produce such approximations required the estimation of proportional impact in the form of lost/dead trees per hectare. This was done using TK Le's approximations of genus level impacts from myrtle rust which gave an impact score between 0 and 1. This can be thought of as proportional damage. These estimations where then combined with stand-level tree and plant data originally collected and summarised by Meryl Theng to assess impacts to biomass. We then adapted to assess only tree information for a given plot rather than allometric data
+
+## Data preparation
+
+The following is adapted from 0_Data prep.R code written by Meryl Theng <https://github.com/meryltheng/carbon-contribution.git>.
+
+Code remains mostly unchanged with only some renaming.
+
+### Read NVIS data (MVG and MVS)
+
+```{r}
+"----------- Read NVIS data (MVG and MVS) ---------------"
+# NVIS extant data. Available at: https://www.dcceew.gov.au/environment/environment-information-australia/national-vegetation-information-system/data-products
+# read NVIS raster layers (already projected to Australian Albers)
+# read MVG layer
+raster_file = 'Data/Spatial/NVIS_MVG_RAS_AA.tif'
+MVG <- raster(raster_file)
+
+# read MVS layer
+raster_file = 'Data/Spatial/NVIS_MVS_RAS_AA.tif'
+MVS <- raster(raster_file)
+
+# Define commonly required projections (for crs transformation later)
+LatLong <- '+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0'
+Albers  <- '+proj=aea +lat_1=-18 +lat_2=-36 +lat_0=0 +lon_0=132 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs'
+```
+
+### Biomass Plot Library data
+
+```{r}
+# https://portal.tern.org.au/metadata/TERN/fc4a7249-ebb2-4ada-8e06-b552bfb297a3
+# please download the necessary data file 'biolib_treelist.csv' from the above 
+# link and place it in the Data/Biomass Plot Library/ folder (>100MB, so not included in the repo)
+
+# read and subset to 'recent' data (2013 onwards) 
+file_name = 'Data/Biomass Plot Library/biolib_treelist.csv' # tree-level data
+all_data <- fread(file_name)
+bpl_data <- all_data[obs_time >= "2013-01-01"]
+length(unique(bpl_data$tree)) # all records of unique trees (might wanna double-check)
+rm(all_data); gc()
+
+# add genus (other cols are non-impt placeholders)
+bpl_data[, c("genus", "sp", "spp", "blah") := tstrsplit(species, " ", fixed=TRUE)]
+bpl_data$family <- NA
+
+# match record locations to MVG/MVS class
+bpl_data_sf <- sf::st_as_sf(bpl_data, coords = c("longitude", "latitude"), crs = LatLong) # GDA94
+# reproject to Australian Albers
+bpl_data_AA <- sf::st_transform(bpl_data_sf,
+                                 crs = Albers)
+
+# append MVG to site info
+mvgValue = extract(MVG, sf::st_coordinates(bpl_data_AA))
+bpl_data_AA <- cbind(bpl_data_AA, mvgValue)
+
+# append MVS to site info
+mvsValue = extract(MVS, sf::st_coordinates(bpl_data_AA))
+bpl_data_AA <- cbind(bpl_data_AA, mvsValue)
+
+# reformat to standardise
+bpl_data_input <- bpl_data_AA |>
+  dplyr::select(geometry = geometry,
+         #longitude = longitude,
+         #latitude = latitude,
+         site = site,
+         sitearea_ha = sitearea_ha, # total area of site (sum of all subplots)
+         obs_time = obs_time,
+         plantID = tree,
+         family = family,
+         genus = genus,
+         species = species,
+         measurement = measurement, # method used to measure diameter
+         diameter = diameter,
+         height = ht, # tree height; not alws avail
+         agb_est = agb_drymass, # estimated; we won't use this, will use our own calculations for standardisation (note: BPL estimates look to be in the wrong scale not in kg)
+         mvgValue = mvgValue,
+         mvsValue = mvsValue
+         )
+
+# save(bpl_data_AA, file = "bpl_data_AA.RData")
+```
+
+### Robson Creek Rainforest data
+
+```{r}
+# https://portal.tern.org.au/metadata/TERN/5a864ec1-f780-4104-a242-7ff00e1f4962
+
+# read and subset to 'recent' data (2013 onwards) 
+file_name = 'Data/Robson Creek Rainforest/Robson_Creek_diameter_height_biomass_data.csv' # tree-level data
+all_data <- fread(file_name)
+robcreek_data <- all_data |>
+  mutate(obs_time = as.Date(phenomenonTime, "%d/%m/%Y")) |>
+  filter(obs_time >= "2013-01-01") |>
+  arrange(obs_time) |> 
+  group_by(plantId) |>  # one plant has multuple observations
+  slice(n()) # last row (most recent observation of the plant)
+rm(all_data); gc()
+
+# match record locations to MVG/MVS class
+robcreek_data_sf <- sf::st_as_sf(robcreek_data, coords = c("longitude", "latitude"), crs = LatLong) # GDA94
+# reproject to Australian Albers
+robcreek_data_AA <- sf::st_transform(robcreek_data_sf,
+                                crs = Albers)
+
+# append MVG to site info
+mvgValue = extract(MVG, sf::st_coordinates(robcreek_data_AA))
+robcreek_data_AA <- cbind(robcreek_data_AA, mvgValue)
+
+# append MVS to site info
+mvsValue = extract(MVS, sf::st_coordinates(robcreek_data_AA))
+robcreek_data_AA <- cbind(robcreek_data_AA, mvsValue)
+
+# reformat to standardise
+robcreek_data_input <- robcreek_data_AA |>
+  dplyr::select(geometry = geometry,
+         #longitude = longitude,
+         #latitude = latitude,
+         site = siteId,
+         sitearea_ha = plotLength_metres, 
+         obs_time = obs_time,
+         plantID = plantId,
+         family = family,
+         genus = genus,
+         species = scientificName,
+         measurement = stemDiameterPointOfMeasurement_metres, # method used to measure diameter
+         diameter = stemDiameter_centimetres,
+         height = stemHeight_metres, # tree height; not alws avail
+         agb_est = aboveGroundBiomass_kilograms, # estimated; we won't use this, will use our own calculations for standardisation
+         mvgValue = mvgValue,
+         mvsValue = mvsValue
+  ) |>
+  mutate(site = rep("Robertson Creek", nrow(robcreek_data_AA)), 
+         sitearea_ha = rep(1, nrow(robcreek_data_AA)), # 1ha
+         measurement = rep("D130", nrow(robcreek_data_AA)), # diameter at 130cm
+         )
+
+```
+
+### Calperum Mallee data
+
+```{r}
+# https://portal.tern.org.au/metadata/TERN/c8d054b2-9dfc-4328-8251-f0fd9276083d
+
+# read and subset to 'recent' data (2013 onwards) 
+file_name = 'Data/Calperum Mallee/Calperum_Mallee_diameter_height_biomass_data.csv' # tree-level data
+all_data <- fread(file_name)
+calperum_data <- all_data |>
+  mutate(obs_time = as.Date(phenomenonTime, "%d/%m/%Y")) |>
+  filter(obs_time >= "2013-01-01") |>
+  arrange(obs_time) |> 
+  group_by(plantId) |>  # one plant has multuple observations
+  slice(n()) # last row (most recent observation of the plant); lol 85 plants
+rm(all_data); gc()
+
+# match record locations to MVG/MVS class
+calperum_data_sf <- sf::st_as_sf(calperum_data, coords = c("longitude", "latitude"), crs = LatLong) # GDA94
+# reproject to Australian Albers
+calperum_data_AA <- sf::st_transform(calperum_data_sf,
+                                     crs = Albers)
+
+# append MVG to site info
+mvgValue = extract(MVG, sf::st_coordinates(calperum_data_AA))
+calperum_data_AA <- cbind(calperum_data_AA, mvgValue)
+
+# append MVS to site info
+mvsValue = extract(MVS, sf::st_coordinates(calperum_data_AA))
+calperum_data_AA <- cbind(calperum_data_AA, mvsValue)
+
+# reformat to standardise
+calperum_data_input <- calperum_data_AA |>
+  dplyr::select(geometry = geometry,
+         #longitude = longitude,
+         #latitude = latitude,
+         site = siteId,
+         sitearea_ha = plotLength_metres, 
+         obs_time = obs_time,
+         plantID = plantId,
+         family = family,
+         genus = genus,
+         species = scientificName,
+         measurement = stemDiameterPointOfMeasurement_metres, # method used to measure diameter
+         diameter = stemDiameter_centimetres,
+         height = stemHeight_metres, # tree height; not alws avail
+         agb_est = aboveGroundBiomass_kilograms, # estimated; we won't use this, will use our own calculations for standardisation
+         mvgValue = mvgValue,
+         mvsValue = mvsValue
+  ) |>
+  mutate(site = rep("Calperum Mallee", nrow(calperum_data_AA)), 
+         sitearea_ha = rep(1, nrow(calperum_data_AA)), # 1ha
+         measurement = rep("D10", nrow(calperum_data_AA)), # diameter at 10cm
+  )
+```
+
+### Compile and save all data
+
+```{r}
+save(bpl_data_input,
+     robcreek_data_input,
+     calperum_data_input,
+     file = "Input/data_clean.RData")
+```
+
+## Tree data summarisations
+
+The following is adapted 1_AGB contribution.R code written by Meryl Theng <https://github.com/meryltheng/carbon-contribution.git>.
+
+Code has been mostly streamlined to remove unnecessary calculations and data, primarily calculations of biomass. Added additional summarisations by MVS in addition to MVG.
+
+```{r}
+# load data in
+load("Input/data_clean.RData")
+# merge standardised datasets
+all_data <- rbind(bpl_data_input,
+                  calperum_data_input,
+                  robcreek_data_input)
+
+# remove records without genus/species information
+all_data <- all_data |>
+  filter(!is.na(genus), species != "Tree") 
+
+# add sizeclass as a column where DBH is grouped 0-30, 31-60, 61+
+all_data$sizeclass <- cut(all_data$diameter,
+                         breaks = c(0, 30, 60, Inf),
+                         labels = c("0-30", "31-60", "61+"),
+                         right = FALSE)
+# Consolidate genera misspellings
+all_data$genus<-gsub("Grevillia", "Grevillea", all_data$genus)
+
+# Grouping all data by genus, sizeclass
+all_data_std <- all_data |>
+  group_by(site, genus, sizeclass) |>
+  summarise(geometry = unique(geometry),
+            site = unique(site),
+            sitearea_ha = unique(sitearea_ha),
+            genus = unique(genus),
+            mvgValue = unique(mvgValue),
+            mvsValue = unique(mvsValue),
+            trees = n(),
+            trees_per_ha = n()/unique(sitearea_ha)) # standardised to per ha
+
+# Grouping by mvg
+all_data_mvg <- all_data_std |>
+  group_by(mvgValue) |>
+  mutate(n_sites_per_mvg = length(unique(site))) |>
+  group_by(mvgValue, genus, sizeclass) |>
+  summarise(n_sites_per_mvg = unique(n_sites_per_mvg),
+            genus = unique(genus),
+            mvgValue = unique(mvgValue),
+            trees_per_ha = mean(trees_per_ha, na.rm = T)) # standardised to per ha
+
+# grouping by mvs
+all_data_mvs <- all_data_std |>
+  group_by(mvsValue) |>
+  mutate(n_sites_per_mvs = length(unique(site))) |>
+  group_by(mvsValue, genus, sizeclass) |>
+  summarise(n_sites_per_mvs = unique(n_sites_per_mvs),
+            genus = unique(genus),
+            mvsValue = unique(mvsValue),
+            trees_per_ha = mean(trees_per_ha, na.rm = T)) # standardised to per ha
+
+```
+
+## Damage calculations
+
+THe following part of the script is a modified version of the damages.R source file(?)/ function(?) which was originally to be passed into the 6_Damages plus.R script. However, this is no longer necessary as we are not iterating over climate scenarios in the current work. The following code chunk takes the damage samples produced by TK's estimations and uses them to calculate firs the impact to plants based on their genus. This is as simple as averaging within each sample. This is followed by calculations of the impact to the broader MVG. This is done by taking the tree library information and calculating first the how many trees/plants will be impacted per hectare and then grouping by the MVG. Once this is a complete, 1000 samples of damage are produced. This is then repeated for MVS. These 1000 samples are then averaged to produce a single dataframe with values then used to produce the map
+
+### Genus level
+
+```{r}
+impact_dir = 'Python/MR_samples'
+
+# Read in & summarise each sample at genus level
+damage_samples_genus <- list.files(path = impact_dir, 
+                                   pattern = "*.csv", 
+                                   full.names = TRUE) |>
+  map(function(x){
+    read.csv(x) |>
+      mutate(Genus = tools::toTitleCase(Genus)) |>  # <-- standardise to first letter caps
+      group_by(Genus) |>
+      summarise(Impact = mean(Damage, na.rm = TRUE), .groups = "drop") |>
+      filter(!is.na(Impact)) |>
+      rename(genus = Genus)
+  })
+
+# Stack all 1000 runs and summarise across them 
+genus_impacts <- damage_samples_genus |>
+  bind_rows() |>
+  group_by(genus) |>
+  summarise(
+    Impact_median = round((100*median(Impact, na.rm = TRUE)), digits = 1),
+    Impact_mean  = round((100*mean(Impact, na.rm = TRUE)), digits = 1),
+    Impact_q025  = quantile(Impact, 0.025, na.rm = TRUE),
+    Impact_q975  = quantile(Impact, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    # combine CI into one column as [x%, y%]
+    CI95 = paste0(
+      "[",
+      scales::percent(Impact_q025, accuracy = 0.1), ", ",
+      scales::percent(Impact_q975, accuracy = 0.1),
+      "]"
+    )
+  ) |>
+  left_join(all_data_std |>
+              group_by(genus) |>
+              summarise(`In tree data` = TRUE, .groups = "drop"),
+            by = "genus") |>
+  mutate(`In tree data` = if_else(is.na(`In tree data`), FALSE, `In tree data`)) |>
+  dplyr::select(genus, Impact_mean, Impact_median, CI95, `In tree data`)
+
+
+
+# Create thesis-ready flextable
+ft_genus_impacts <- genus_impacts |>
+  mutate(`In tree data` = if_else(`In tree data`, "Yes", "No")) |>
+  arrange(desc(Impact_median)) |>
+  dplyr::select(genus, Impact_median, CI95, `In tree data`) |>
+  flextable() |>
+  
+  # Header labels
+  set_header_labels(
+    genus = "Genus",
+    Impact_median = "Median impact (%)",
+    CI95 = "95% credible interval",
+    `In tree data` = "In tree data?"
+  ) |>
+  
+  # Header styling
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>   # light gray header
+  color(part = "header", color = "black") |>
+  
+  # Zebra striping for rows
+  theme_zebra() |>
+  
+  # Align columns
+  align(j = "Impact_median", align = "center", part = "header") |>
+  align(j = "In tree data", align = "center", part = "header") |>
+  align(j = "CI95", align = "center", part = "header") |>
+  align(j = "Impact_median", align = "center") |>
+  align(j = "CI95", align = "center") |>
+  align(j = "In tree data", align = "center") |>
+  
+  # Italicize genus column
+  italic(j = "genus") |>
+  
+  # Adjust font size and autofit
+  fontsize(size = 10, part = "all") |>
+  width(j = 3, width = 1.3, unit = "in") |>
+  
+  # Add black horizontal lines
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(genus_impacts), border = fp_border(color="black", width = 1))
+
+# Preview in R
+ft_genus_impacts
+
+#Save as image
+# Save flextable as PNG
+save_as_image(ft_genus_impacts, path = "Output/images/genus_impacts_final.png", zoom = 2)
+
+
+# Export to Word
+read_docx() |>
+  body_add_par("Genus-level Impacts", style = "heading 1") |>
+  body_add_flextable(ft_genus_impacts) |>
+  print(target = "Output/documents/thesis_genus_impacts_table.docx")
+```
+
+### MVG damage calculations
+
+```{r}
+tree_library = all_data_mvg
+impact_dir = 'Python/MR_samples'
+# sampling damage to each genus within each mvg
+damage_samples_mvg <- list.files(path = impact_dir, pattern = "*.csv", full.names = T) |>
+    map(function(x){
+      # aggregate species impacts by genus
+      impact_by_genus <- read.csv(x) |>
+        group_by(Genus) |>
+        summarise(Impact = mean(Damage, na.rm = T)) |>
+        filter(!is.na(Impact)) |>
+        rename(genus = Genus)
+      # calculate impact to individual trees by MVG
+      impact_mvg <- left_join(tree_library, impact_by_genus, by = c('genus')) |> # Assign based on genus match 
+        mutate(Impact = if_else(is.na(Impact), 0, Impact, NA)) |> # if no info, impact = 0
+        mutate(Impact_trees = trees_per_ha * Impact) |> # calc absolute impact to trees per ha
+        group_by(mvgValue) |>
+        # summarise(Impact_trees = sum(Impact_trees),
+        #           Impact_prop = sum(Impact_trees) / sum(trees_per_ha)) |>
+        st_drop_geometry() |>
+        rename(MVG = mvgValue) |>
+        ungroup() |>
+        complete(MVG = c(1:32,99), fill = list(Impact_trees = 0, Impact = 0, trees_per_ha = 0))
+      return(impact_mvg)
+    })
+
+
+
+# Damage_samples is the existing list of 1000 tibbles
+# Average across 1000 trials
+damage_avg_mvg <- damage_samples_mvg |>
+  bind_rows() |>          # stack 1000
+  group_by(MVG, genus, sizeclass) |>              # keep sizeclass
+  summarise(
+    Impact_mean       = mean(Impact, na.rm = TRUE),
+    Impact_q025       = quantile(Impact, 0.025, na.rm = TRUE),
+    Impact_q975       = quantile(Impact, 0.975, na.rm = TRUE),
+    
+    ImpactTrees_mean  = mean(Impact_trees, na.rm = TRUE),
+    ImpactTrees_q025  = quantile(Impact_trees, 0.025, na.rm = TRUE),
+    ImpactTrees_q975  = quantile(Impact_trees, 0.975, na.rm = TRUE),
+    
+    # keep stable attributes from the first run (identical across runs)
+    trees_per_ha      = first(trees_per_ha),
+    n_sites_per_mvg   = first(n_sites_per_mvg),
+    .groups = "drop"
+  ) |>
+  arrange(MVG, genus, sizeclass)
+
+# Output to a csv
+write.csv(damage_avg_mvg, "Output/impact_avg_by_MVG_genus_sizeclass.csv", )
+damage_avg_mvg <- read_csv("Output/impact_avg_by_MVG_genus_sizeclass.csv")
+
+# Extract information on to a summarised MVG df
+susceptibility_mvg <- damage_avg_mvg |>
+  group_by(MVG) |>
+  summarise(
+    ImpactTrees_tot   = sum(ImpactTrees_mean, na.rm = TRUE),
+    trees_per_ha_tot  = sum(trees_per_ha, na.rm = TRUE),
+    Impact_proportion = (ImpactTrees_tot / trees_per_ha_tot),
+    n_sites_per_mvg   = first(n_sites_per_mvg),
+    .groups = "drop"
+  ) |>
+  replace_na(list(Impact_proportion = 0, n_sites_per_mvg = 0)) |> #data availability flag
+  mutate(has_tree_data = if_else(n_sites_per_mvg > 0, TRUE, FALSE))
+
+# Save MVGs with no tree data for overlay/masking
+mvgs_no_tree_data <- susceptibility_mvg |> 
+  filter(has_tree_data == FALSE) |>
+  dplyr::select(MVG)
+
+```
+
+#### MVS Damage calculations
+
+```{r}
+tree_library = all_data_mvs
+impact_dir = 'Python/MR_samples'
+# sampling damage to each genus within each mvs
+damage_samples_mvs <- list.files(path = impact_dir, pattern = "*.csv", full.names = T) |>
+    map(function(x){
+      # aggregate species impacts by genus
+      impact_by_genus <- read.csv(x) |>
+        group_by(Genus) |>
+        summarise(Impact = mean(Damage, na.rm = T)) |>
+        filter(!is.na(Impact)) |>
+        rename(genus = Genus)
+      # calculate impact to individual trees by mvs
+      impact_mvs <- left_join(tree_library, impact_by_genus, by = c('genus')) |> # Assign based on genus match 
+        mutate(Impact = if_else(is.na(Impact), 0, Impact, NA)) |> # if no info, impact = 0
+        mutate(Impact_trees = trees_per_ha * Impact) |> # calc absolute impact to trees per ha
+        group_by(mvsValue) |>
+        # summarise(Impact_trees = sum(Impact_trees),
+        #           Impact_prop = sum(Impact_trees) / sum(trees_per_ha)) |>
+        st_drop_geometry() |>
+        rename(MVS = mvsValue) |>
+        ungroup() |>
+        complete(MVS = c(1:75,79,80,90:93,96:99), fill = list(Impact_trees = 0, Impact = 0, trees_per_ha = 0))
+      return(impact_mvs)
+    })
+
+
+# Damage_samples is the existing list of 1000 tibbles
+# Average across 1000 trials
+
+damage_avg_mvs <- damage_samples_mvs |>
+  bind_rows() |>          # stack 1000
+  group_by(MVS, genus, sizeclass) |>              # keep sizeclass
+  summarise(
+    Impact_mean       = mean(Impact, na.rm = TRUE),
+    Impact_q025       = quantile(Impact, 0.025, na.rm = TRUE),
+    Impact_q975       = quantile(Impact, 0.975, na.rm = TRUE),
+    
+    ImpactTrees_mean  = mean(Impact_trees, na.rm = TRUE),
+    ImpactTrees_q025  = quantile(Impact_trees, 0.025, na.rm = TRUE),
+    ImpactTrees_q975  = quantile(Impact_trees, 0.975, na.rm = TRUE),
+    
+    # keep stable attributes from the first run (identical across runs)
+    trees_per_ha      = first(trees_per_ha),
+    n_sites_per_mvs   = first(n_sites_per_mvs),
+    .groups = "drop"
+  ) |>
+  arrange(MVS, genus, sizeclass)
+
+# Output to a csv
+write.csv(damage_avg_mvs, "Output/impact_avg_by_MVS_genus_sizeclass.csv", )
+damage_avg_mvs <- read_csv("Output/impact_avg_by_MVS_genus_sizeclass.csv")
+
+# Extract information on to a summarised MVS df
+susceptibility_mvs <- damage_avg_mvs |>
+  group_by(MVS) |>
+  summarise(
+    ImpactTrees_tot   = sum(ImpactTrees_mean, na.rm = TRUE),
+    trees_per_ha_tot  = sum(trees_per_ha, na.rm = TRUE),
+    Impact_proportion = (ImpactTrees_tot / trees_per_ha_tot),
+    n_sites_per_mvs   = first(n_sites_per_mvs),
+    .groups = "drop"
+  ) |>
+  replace_na(list(Impact_proportion = 0, n_sites_per_mvs = 0)) |> #data availability flag
+  mutate(has_tree_data = if_else(n_sites_per_mvs > 0, TRUE, FALSE))
+
+# Save MVGs with no tree data for overlay/masking
+mvss_no_tree_data <- susceptibility_mvs |> 
+  filter(has_tree_data == FALSE) |>
+  dplyr::select(MVS)
+```
+
+#### Assigning descriptions to NVIS data and tabling
+
+```{r}
+# Set global default for NA string
+set_flextable_defaults(na_str = "No data")
+
+MVG_descs = c("Rainforests and Vine Thickets", #1
+              "Eucalypt Tall Open Forests", #2
+              "Eucalypt Open Forests", #3
+              "Eucalypt Low Open Forests", #4
+              "Eucalypt Woodlands", #5 
+              "Acacia Forests and Woodlands", #6
+              "Callitris Forests and Woodlands", #7
+              "Casuarina Forests and Woodlands", #8
+              "Melaleuca Forests and Woodlands", #9
+              "Other Forests and Woodlands", #10
+              "Eucalypt Open Woodlands", #11
+              "Tropical Eucalypt Woodlands/Grasslands", #12
+              "Acacia Open Woodlands", #13
+              "Mallee Woodlands and Shrublands", #14
+              "Low Closed Forests and Tall Closed Shrublands", #15
+              "Acacia Shrublands", #16
+              "Other Shrublands", #17
+              "Heathlands", #18
+              "Tussock Grasslands", #19
+              "Hummock Grasslands", #20
+              "Other Grasslands, Herblands, Sedgelands and Rushlands", #21
+              "Chenopod Shrublands, Samphire Shrublands and Forblands", #22
+              "Mangroves", #23
+              "Inland Aquatic", #24
+              "Cleared, non-native veg., buildings", #25
+              "Unclassfied native veg.", #26
+              "Naturally bare - sand, rock, claypan, mudflat", #27
+              "Sea and estuaries", #28
+              "Regrowth, modified native vegetation", #29
+              "Unclassified forest", #30
+              "Other Open Woodlands", #31
+              "Mallee Open Woodlands and Sparse Mallee Shrublands", #32
+              "No Data") #99)
+names(MVG_descs) <- c(1:32,99)
+
+# Format MVG summary
+mvg_summary <- susceptibility_mvg |>
+  mutate(
+    ImpactTrees_tot = ifelse(has_tree_data == FALSE, NA, round(ImpactTrees_tot, digits = 1)),
+    trees_per_ha_tot = ifelse(has_tree_data == FALSE, NA, round(trees_per_ha_tot, digits = 1)),
+    Impact_proportion_pct = ifelse(has_tree_data == FALSE, NA, round(100*Impact_proportion, digits = 1)),
+    Description = MVG_descs
+  ) |>
+    dplyr::select(-Impact_proportion)
+
+# Check how many have no info
+mvg_no_data <- susceptibility_mvg |>
+  summarise(
+    n_total = n(),
+    n_false  = sum(has_tree_data == FALSE, na.rm = TRUE),
+    percent_no_data = scales::percent(n_false / n_total, accuracy = 0.1)
+  )
+
+# Create flextable with description
+ft_mvg <- mvg_summary |>
+  dplyr::select(MVG, Description, ImpactTrees_tot, trees_per_ha_tot, Impact_proportion_pct) |>
+  flextable() |>
+  set_header_labels(
+    MVG = "MVG",
+    Description = "Description",
+    ImpactTrees_tot = "Impacted plants/ha",
+    trees_per_ha_tot = "Plants/ha",
+    Impact_proportion_pct = "Impact proportion (%)"
+  ) |>
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>
+  color(part = "header", color = "black") |>
+  align(j = 3:5, align = "center") |>
+  align(j = c("ImpactTrees_tot", "trees_per_ha_tot", "Impact_proportion_pct"),
+        align = "center", part = "all") |>
+  #font(fontname = "Georgia", part = "all") |>
+  fontsize(size = 10, part = "all") |>
+  theme_zebra(odd_body = "grey90") |>
+  autofit() |>
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(mvg_summary), border = fp_border(color="black", width = 1))
+
+ft_mvg
+
+# Export as high-res PNG
+save_as_image(ft_mvg, path = "Output/images/mvg_impacts_table_with_descriptions.png", zoom = 2)
+
+# Export to blank doc
+doc <- read_docx()
+doc <- body_add_flextable(doc, value = ft_mvg)
+print(doc, target = "Output/plots/mvg_impacts.docx")
+
+MVS_descs = c("Cool temperate rainforest",
+              "Tropical or sub-tropical rainforest",
+              "Eucalyptus (+/- tall) open forest with a dense broad-leaved and/or tree-fern understorey (wet sclerophyll)",
+              "Eucalyptus open forests with a shrubby understorey",
+              "Eucalyptus open forests with a grassy understorey",
+              "Warm temperate rainforest",
+              "Tropical Eucalyptus open forests and woodlands with a tall annual grassy understorey",
+              "Eucalyptus woodlands with a shrubby understorey",
+              "Eucalyptus woodlands with a tussock grass understorey",
+              "Eucalyptus woodlands with a hummock grass understorey",
+              "Tropical mixed spp forests and woodlands",
+              "Callitris forests and woodlands",
+              "Brigalow (Acacia harpophylla) forests and woodlands",
+              "Other Acacia forests and woodlands",
+              "Melaleuca open forests and woodlands",
+              "Other forests and woodlands",
+              "Boulders/rock with algae, lichen or scattered plants, or alpine fjaeldmarks",
+              "Eucalyptus low open woodlands with hummock grass",
+              "Eucalyptus low open woodlands with tussock grass",
+              "Mulga (Acacia aneura) woodlands +/- tussock grass +/- forbs",
+              "Other Acacia tall open shrublands and [tall] shrublands",
+              "Acacia (+/- low) open woodlands and shrublands with chenopods",
+              "Acacia (+/- low) open woodlands and shrublands with hummock grass",
+              "Acacia (+/- low) open woodlands and shrublands +/- tussock grass",
+              "Acacia (+/- low) open woodlands and sparse shrublands with a shrubby understorey",
+              "Casuarina and Allocasuarina forests and woodlands",
+              "Mallee with hummock grass",
+              "Low closed forest or tall closed shrublands (including Acacia, Melaleuca and Banksia)",
+              "Mallee with a dense shrubby understorey",
+              "Heathlands",
+              "Saltbush and bluebush shrublands",
+              "Other shrublands",
+              "Hummock grasslands",
+              "Mitchell grass (Astrebla) tussock grasslands",
+              "Blue grass (Dicanthium) and tall bunch grass (Vitiveria syn: Chrysopogon) tussock grasslands",
+              "Temperate tussock grasslands",
+              "Other tussock grasslands",
+              "Wet tussock grassland with herbs, sedges or rushes, herblands or ferns",
+              "Mixed chenopod, samphire +/- forbs",
+              "Mangroves",
+              "Saline or brackish sedgelands or grasslands",
+              "Naturally bare, sand, rock, claypan, mudflat",
+              "Salt lakes and lagoons",
+              "Freshwater, dams, lakes, lagoons or aquatic plants",
+              "Mulga (Acacia aneura) open woodlands and sparse shrublands +/- tussock grass",
+              "Sea, estuaries (includes seagrass)",
+              "Eucalyptus open woodlands with shrubby understorey",
+              "Eucalyptus open woodlands with a grassy understorey",
+              "Melaleuca shrublands and open shrublands",
+              "Banksia woodlands",
+              "Mulga (Acacia aneura) woodlands and shrublands with hummock grass",
+              "Mulga (Acacia aneura) open woodlands and sparse shrublands with hummock grass",
+              "Eucalyptus low open woodlands with a shrubby understorey",
+              "Eucalyptus tall open forest with a fine-leaved shrubby understorey",
+              "Mallee with an open shrubby understorey",
+              "Eucalyptus (+/- low) open woodlands with a chenopod or samphire understorey",
+              "Lignum shrublands and wetlands",
+              "Leptospermum forests and woodlands",
+              "Eucalyptus woodlands with ferns, herbs, sedges, rushes or wet tussock grassland",
+              "Eucalyptus tall open forests and open forests with ferns, herbs, sedges, rushes or wet tussock grasses",
+              "Mallee with a tussock grass understorey",
+              "Dry rainforest or vine thickets",
+              "Sedgelands, rushes or reeds",
+              "Other grasslands",
+              "Eucalyptus woodlands with a chenopod or samphire understorey",
+              "Open mallee woodlands and sparse mallee shrublands with a hummock grass understorey",
+              "Open mallee woodlands and sparse mallee shrublands with a tussock grass understorey",
+              "Open mallee woodlands and sparse mallee shrublands with an open shrubby understorey",
+              "Open mallee woodlands and sparse mallee shrublands with a dense shrubby understorey",
+              "Callitris open woodlands",
+              "Casuarina and Allocasuarina open woodlands with a tussock grass understorey",
+              "Casuarina and Allocasuarina open woodlands with a hummock grass understorey",
+              "Casuarina and Allocasuarina open woodlands with a chenopod shrub understorey",
+              "Casuarina and Allocasuarina open woodlands with a shrubby understorey",
+              "Melaleuca open woodlands",
+              "Other open woodlands",
+              "Other sparse shrublands and sparse heathlands",
+              "Regrowth or modified forests and woodlands",
+              "Regrowth or modified shrublands",
+              "Regrowth or modified graminoids",
+              "Regrowth or modified chenopod shrublands, samphire or forblands",
+              "Unclassified forest",
+              "Unclassified native vegetation",
+              "Cleared, non-native vegetation, buildings",
+              "Unknown/no data"
+              )
+names(MVS_descs) <- c(1:75,79,80,90:93,96:99)
+
+# Format MVS summary
+mvs_summary <- susceptibility_mvs |>
+  mutate(
+    ImpactTrees_tot = ifelse(has_tree_data == FALSE, NA, round(ImpactTrees_tot, digits = 1)),
+    trees_per_ha_tot = ifelse(has_tree_data == FALSE, NA, round(trees_per_ha_tot, digits = 1)),
+    Impact_proportion_pct = ifelse(has_tree_data == FALSE, NA, round(100*Impact_proportion, digits = 1)),
+    Description = MVS_descs
+  ) |>
+    dplyr::select(-Impact_proportion)
+
+# Check how many have no info
+mvs_no_data <- susceptibility_mvs |>
+  summarise(
+    n_total = n(),
+    n_false  = sum(has_tree_data == FALSE, na.rm = TRUE),
+    percent_no_data = scales::percent(n_false / n_total, accuracy = 0.1)
+  )
+
+
+# Create flextable with description
+ft_mvs <- mvs_summary |>
+  dplyr::select(MVS, Description, ImpactTrees_tot, trees_per_ha_tot, Impact_proportion_pct) |>
+  flextable() |>
+  set_header_labels(
+    MVS = "MVS",
+    Description = "Description",
+    ImpactTrees_tot = "Impacted plants/ha",
+    trees_per_ha_tot = "Plants/ha",
+    Impact_proportion_pct = "Impact proportion (%)"
+  ) |>
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>
+  color(part = "header", color = "black") |>
+  align(j = 3:5, align = "center") |>
+  align(j = c("ImpactTrees_tot", "trees_per_ha_tot", "Impact_proportion_pct"),
+        align = "center", part = "all") |>
+  fontsize(size = 10, part = "all") |>
+  theme_zebra(odd_body = "grey90") |>
+  autofit() |>
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(mvs_summary), border = fp_border(color="black", width = 1))
+
+ft_mvs
+
+# Export as high-res PNG
+save_as_image(ft_mvs, path = "Output/images/mvs_impacts_table_with_descriptions.png", zoom = 2)
+
+# Export to blank doc
+doc <- read_docx()
+doc <- body_add_flextable(doc, value = ft_mvs)
+print(doc, target = "Output/plots/mvs_impacts.docx")
+```
+
+#### Assign data to rasters
+
+First, rasters are loaded in and MVGs and MVSs are assigned impact proportions taken from the susceptibility tables
+
+```{r}
+# Setting up rasters in terra
+MVG_raster <- rast("data/spatial/NVIS_MVG_RAS_AA.tif")
+MVS_raster <- rast("data/spatial/NVIS_MVS_RAS_AA.tif")
+
+# Assign levels based on NVIS descriptions
+levels(MVG_raster) = data.frame(MVG=c(1:32,99), description=MVG_descs)
+
+levels(MVS_raster) = data.frame(MVS=c(1:75,79,80,90:93,96:99), description=MVS_descs)
+
+# Aggregate susceptibility map (MVG-level)
+# Lookup table for impact proportion
+MVG_lut <- data.frame(from = susceptibility_mvg$MVG,
+                      to   = susceptibility_mvg$Impact_proportion)
+
+
+# Create a quick n dirty susceptibility raster by MVG
+MVG_Impact_raster <- classify(MVG_raster, rcl = MVG_lut)
+
+
+# Aggregate susceptibility map (MVS-level)
+# Lookup table for impact proportion
+MVS_lut <- data.frame(from = susceptibility_mvs$MVS,
+                      to   = susceptibility_mvs$Impact_proportion)
+
+
+# Create a quick n dirty susceptibility raster by MVS
+MVS_Impact_raster <- classify(MVS_raster, rcl = MVS_lut)
+
+# Plot these side by side
+# Stack rasters for visualisation
+MVG_MVS_stack <- c(MVG_Impact_raster, MVS_Impact_raster)
+names(MVG_MVS_stack) <- c("Susceptiblity by MVG","Susceptibility by MVS")
+
+
+```
+
+## Combining with suitability
+
+Once the suitability is modeled using MaxEnt and the susceptibility is calculated and projected spatially using NVIS information, these two rasters are mutliplied to give a relative probability of A. psidii presence in a given cell. This is possible as the suitability raster output from maxent produces a relative probability field with values 0 through to 1 which can be interpreted as a probability that a given cell is suitable. The susceptibility rasters on the other hand provide an estimation of the proportion of plants (or plant material perhaps) that is assumed to be damaged by myrtle rust in a given cell. As this is also a range from 0 to 1, combining these two rasters will provide an index from 0 through to 1 which suggests the expected level of damage if myrtle rust were to occur at a given site, based on the available data.
+
+```{r}
+
+#Load in suitability raster
+suit <- rast("data/Predictions/maxent_prediction.tif")
+
+# Apply threshold for categorisation later - using cloglog threshold from MTSS
+suit_thresh <- suit
+suit_thresh[suit_thresh <= 0.114] <- 0
+
+
+# Make sure CRS matches
+MVG_MVS_stack <- project(MVG_MVS_stack, suit)
+
+# Resampling to ensur ext and res match
+MVG_MVS_stack_align <- resample(MVG_MVS_stack, suit, method = "bilinear") # both rasters are continous data so bilinear (could potentially switch to cubic)
+
+# Multiply susceptibility stack by suitability
+sus_x_suit <- MVG_MVS_stack_align * suit 
+names(sus_x_suit) <- c("Mrust_val_MVG", "Mrust_val_MVS")
+
+writeRaster(sus_x_suit, filename = "Output/data/Apsidii_sus_x_suit.tif", overwrite = TRUE)
+sus_x_suit <- rast("Output/data/Apsidii_sus_x_suit.tif")
+names(sus_x_suit) <- c("Mrust_val_MVG", "Mrust_val_MVS") #in case names not carryin in
+
+plot(sus_x_suit)
+
+# Now multiply again but with thresholded 
+sxs_thresh <- MVG_MVS_stack_align * suit_thresh
+names(sxs_thresh) <- c("Mrust_val_MVG", "Mrust_val_MVS")
+
+writeRaster(sxs_thresh, filename = "Output/data/Apsidii_sxs_thresh.tif")
+sxs_thresh <- rast("Output/data/Apsidii_sxs_thresh.tif")
+
+# Scaling the mvs raster now to get a value between 0 and 100
+mm_mvs <- global(sus_x_suit$Mrust_val_MVS, c("min","max"), na.rm = TRUE, wide = TRUE)
+mins_mvs <- mm_mvs$min   # true min per mvs layer
+maxs_mvs <- mm_mvs$max   # true max per mvs layer
+
+sus_x_suit_mvs_scaled <- stretch(sus_x_suit$Mrust_val_MVS, 
+                             minv=0, 
+                             maxv=100, 
+                             smin=mins_mvs, 
+                             smax=maxs_mvs)
+writeRaster(sus_x_suit_mvs_scaled, "Output/data/Apsidii_sus_x_suit_mvs_scaled_0100.tif")
+
+
+#scaling the mvg raster
+mm_mvg <- global(sus_x_suit$Mrust_val_MVG, c("min","max"), na.rm = TRUE, wide = TRUE)
+mins_mvg <- mm_mvg$min   # true min per mvg layer
+maxs_mvg <- mm_mvg$max   # true max per mvg layer
+
+sus_x_suit_mvg_scaled <- stretch(sus_x_suit$Mrust_val_MVG, 
+                             minv=0, 
+                             maxv=100, 
+                             smin=mins_mvg, 
+                             smax=maxs_mvg)
+writeRaster(sus_x_suit_mvg_scaled, "Output/data/Apsidii_sus_x_suit_mvg_scaled_0100.tif", overwrite = TRUE)
+
+# scaling the thresholded raster
+mm_mvs <- global(sxs_thresh$Mrust_val_MVS, c("min","max"), na.rm = TRUE, wide = TRUE)
+mins_mvs <- mm_mvs$min   # true min per mvs layer
+maxs_mvs <- mm_mvs$max   # true max per mvs layer
+
+sxs_thresh_scaled <- stretch(sxs_thresh$Mrust_val_MVS, 
+                             minv=0, 
+                             maxv=100, 
+                             smin=mins_mvs, 
+                             smax=maxs_mvs)
+
+# scaling the thresholded raster
+mm_mvg <- global(sxs_thresh$Mrust_val_MVG, c("min","max"), na.rm = TRUE, wide = TRUE)
+mins_mvg <- mm_mvg$min   # true min per mvg layer
+maxs_mvg <- mm_mvg$max   # true max per mvg layer
+
+sxs_thresh_scaled_mvg <- stretch(sxs_thresh$Mrust_val_MVG, 
+                             minv=0, 
+                             maxv=100, 
+                             smin=mins_mvg, 
+                             smax=maxs_mvg)
+
+
+writeRaster(sxs_thresh_scaled, "Output/data/Apsidii_sxs_thresh_scaled_0100.tif", overwrite = TRUE)
+writeRaster(sxs_thresh_scaled_mvg, "Output/data/Apsidii_sxs_thresh_mvg_scaled_0100.tif", overwrite = TRUE)
+```
+
+### Mask layer of missing values
+
+```{r}
+# ---- Create mask for MVGs with no tree data ----
+# downsample
+# Make sure CRS matches
+MVG_raster <- project(MVG_raster, suit)
+
+# Resampling to ensur ext and res match
+MVG_align <- resample(MVG_raster, suit, method = "bilinear")
+
+# MVG raster is categorical
+lvl <- levels(MVG_raster)[[1]]   # ID = MVG column, description
+
+# Map categories to numeric values (ID)
+MVG_raster_numeric <- classify(MVG_align, rcl = cbind(lvl$MVG, lvl$MVG), others = NA)
+
+# mvgs_no_tree_data is a vector of MVG values missing tree data
+missing_mvgs <- mvgs_no_tree_data$MVG
+
+# mask raster: 1 where MVG is missing, NA otherwise
+mvg_no_data_mask <- ifel(MVG_raster_numeric %in% missing_mvgs, 1, NA)
+# Project to an equal areas crs
+mvg_no_data_alb <- project(mvg_no_data_mask, "EPSG:3577")
+
+# Build a small data.frame with xy and value
+mvg_no_data_mask_df <- as.data.frame(mvg_no_data_mask, xy = TRUE, na.rm = TRUE)
+
+write_csv(mvg_no_data_mask_df, "data/processed/mvg_no_data_mask.csv")
+
+# ---- Create mask for MVSs with no tree data ----
+# downsample
+# Make sure CRS matches
+MVS_raster <- project(MVS_raster, suit)
+
+# Resampling to ensure ext and res match
+MVS_align <- resample(MVS_raster, suit, method = "bilinear")
+
+# MVS raster is categorical
+lvl <- levels(MVS_raster)[[1]]   # ID = MVG column, description
+
+# Map categories to numeric values (ID)
+MVS_raster_numeric <- classify(MVS_align, rcl = cbind(lvl$MVS, lvl$MVS), others = NA)
+
+# mvss_no_tree_data is a vector of MVS values missing tree data
+missing_mvss <- mvss_no_tree_data$MVS
+
+# mask raster: 1 where MVG is missing, NA otherwise
+mvs_no_data_mask <- ifel(MVS_raster_numeric %in% missing_mvss, 1, NA)
+# # Project to an equal areas crs - got rid of this
+# mvs_no_data_alb <- project(mvs_no_data_mask, "EPSG:3577")
+
+# Build a small data.frame with xy and value
+mvs_no_data_mask_df <- as.data.frame(mvs_no_data_mask, xy = TRUE, na.rm = TRUE)
+
+write_csv(mvs_no_data_mask_df, "data/processed/mvs_no_data_mask.csv")
+```
+
+### Visualisations
+
+```{r}
+# Australia outline for maps
+aus_alb_shp <- st_transform(ne_countries(country = "australia", scale = "medium", returnclass = "sf"), "EPSG:3577")
+aus_main_shp <- st_crop(aus_alb_shp,       
+                    xmin = -1.888e6, xmax = 5.5e6,
+                    ymin = -5e6, ymax = -1e6)
+aus_main_shp_wgs84 <- st_transform(aus_main_shp, crs = "EPSG:4326")
+
+# --- susceptibility rasters with masks
+# Ensure they're in the same CRS first
+MVG_Impact_aligned <- project(MVG_Impact_raster, mvg_no_data_mask)
+MVS_Impact_aligned <- project(MVS_Impact_raster, mvs_no_data_mask)
+
+# Resample to match resolutions 
+MVG_Impact_resampled <- resample(MVG_Impact_aligned, mvg_no_data_mask, method = "bilinear")
+MVS_Impact_resampled <- resample(MVS_Impact_aligned, mvs_no_data_mask, method = "bilinear")
+
+# Clip extent to the same as the shapefile
+MVG_Impact_crop <- crop(MVG_Impact_resampled, aus_main_shp_wgs84)
+MVS_Impact_crop <- crop(MVS_Impact_resampled, aus_main_shp_wgs84)
+
+
+# Add an id column so ggplot treats each cell separately
+mvs_no_data_mask_df$mask <- "No data"
+mvs_no_data_mask_df$mask <- "No data"
+
+# Convert the two impact rasters to data frames (with x, y, and value)
+MVG_df <- as.data.frame(MVG_Impact_crop, xy = TRUE, na.rm = FALSE)
+names(MVG_df)[3] <- "Impact"
+
+MVS_df <- as.data.frame(MVS_Impact_crop, xy = TRUE, na.rm = FALSE)
+names(MVS_df)[3] <- "Impact"
+
+# Find common color scale range
+common_limits <- range(c(MVG_df$Impact, MVS_df$Impact), na.rm = TRUE)
+
+# MVG map
+p_mvg <- ggplot() +
+  geom_raster(data = MVG_df, aes(x, y, fill = Impact)) +
+  geom_raster(data = mvg_no_data_mask_df, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  geom_sf(data = aus_main_shp_wgs84, fill = NA, colour = "black", size = 0.3) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Impact",
+    na.value = "transparent"
+  ) +
+  # Alpha legend for no data
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  coord_sf(expand = TRUE) +
+  labs(title = "Estimated impact by MVG") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+# MVS map
+p_mvs <- ggplot() +
+  geom_raster(data = MVS_df, aes(x, y, fill = Impact)) +
+  geom_raster(data = mvs_no_data_mask_df, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  geom_sf(data = aus_main_shp_wgs84, fill = NA, colour = "black", size = 0.3) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Impact",
+    na.value = "transparent"
+  ) +
+  # Alpha legend for no data
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  coord_sf(expand = TRUE) +
+  labs(title = "Estimated impact by MVS") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+
+combined_plot <- p_mvg + p_mvs + plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
+combined_plot
+ggsave("Output/plots/MVG_MVS_susceptibility_comparison.tiff",
+       combined_plot, width = 12.5, height = 6, dpi = 300)
+
+# --- susceptibility suitability combined
+
+# load in scaled rast
+sus_x_suit_mvs_scaled <- rast("Output/data/Apsidii_sus_x_suit_mvs_scaled_0100.tif")
+sus_x_suit_mvg_scaled <- rast("Output/data/Apsidii_sus_x_suit_mvg_scaled_0100.tif")
+
+
+# CUTOFF RASTER SUPERCEDED BY THRESHOLDED RASTER
+# # Cut off raster values below 1 to highlight only important parts
+# cutoff_rast <- ifel(sus_x_suit_mvs_scaled<1, NA, sus_x_suit_mvs_scaled)
+# 
+# writeRaster(cutoff_rast, "Output/data/Apsidii_sus_x_suit_mvs_scaled_0100_cutoff.tif")
+# cutoff_rast <- rast("Output/data/Apsidii_sus_x_suit_mvs_scaled_0100_cutoff.tif")
+
+# Project to an equal areas crs
+sxs_alb <- project(sus_x_suit_mvs_scaled, "EPSG:3577")
+writeRaster(sxs_alb, "data/processed/sxs_alb.tif")
+sxs_alb <- rast("data/processed/sxs_alb.tif")
+sxs_mvg_alb <- project(sus_x_suit_mvg_scaled, "EPSG:3577")
+
+# make sus x suit data frames
+df_sxs <- as.data.frame(sxs_alb, xy = TRUE, na.rm = TRUE)
+df_sxs$x <- round(df_sxs$x, 0)  # EPSG:3577 is in metres, so round to whole metres
+df_sxs$y <- round(df_sxs$y, 0)
+write_csv(df_sxs, "data/processed/df_sxs_alb.csv")
+
+df_sxs_mvg <- as.data.frame(sxs_mvg_alb, xy = TRUE, na.rm = TRUE)
+df_sxs_mvg$x <- round(df_sxs_mvg$x, 0)  # EPSG:3577 is in metres, so round to whole metres
+df_sxs_mvg$y <- round(df_sxs_mvg$y, 0)
+write_csv(df_sxs_mvg, "data/processed/df_sxs_mvg_alb.csv")
+
+
+
+
+# Plot scaled myrtle rust "danger" across australia
+mvs_sxs_map <- ggplot() +
+  geom_raster(data = df_sxs, aes(x, y, fill = Mrust_val_MVS)) +
+  geom_sf(data = aus_main_shp, fill = NA, colour = "black", size = 0.3) +
+  geom_raster(data = mvs_no_data_mask_df, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  scale_fill_viridis_c(
+    option = "inferno",
+    direction = -1,
+    values = scales::rescale(c(0, 5, 20, 50, 70, 100)),
+    name = "Relative myrtle \nrust intensity",
+    na.value = "transparent"
+  ) +
+  # Alpha legend for no data
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  coord_sf(expand = TRUE) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank())
+
+mvs_sxs_map
+ggsave("Output/images/mvg_sxs_map.png", plot = sxs_map, width = 10, height = 8, dpi = 600)
+
+# Add a variable for "mask" fill
+mvg_no_data_mask_df$mask <- "No data"
+
+# Plot scaled myrtle rust "danger" across australia
+mvg_sxs_map <- ggplot() +
+  geom_raster(data = df_sxs_mvg, aes(x, y, fill = Mrust_val_MVG)) +
+  geom_sf(data = aus_main_shp, fill = NA, colour = "black", size = 0.3) +
+  geom_raster(data = mvg_no_data_mask_df, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  scale_fill_viridis_c(
+    option = "inferno",
+    direction = -1,
+    values = scales::rescale(c(0, 5, 20, 50, 70, 100)),
+    name = "Relative myrtle \nrust intensity",
+    na.value = "transparent",
+    guide = guide_colorbar(order = 1)
+  ) +
+  # Alpha legend for no data
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  coord_sf() +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank())
+
+mvg_sxs_map
+ggsave("Output/images/mvg_sxs_map.png", plot = sxs_map, width = 8, height = 6, dpi = 600)
+
+
+```
+
+## Categorisation of Myrtle rust raster
+
+Doing this just for visualisation purposes and for making generalisations later.
+
+```{r}
+# Load in thresholded raster
+sxs_thresh_scaled <- rast("Output/data/Apsidii_sxs_thresh_scaled_0100.tif")
+
+# Define breaks for non-zero values using Jenks/Fisher method
+nonzero_vals <- values(sxs_thresh_scaled)[!is.na(values(sxs_thresh_scaled)) > 0]
+fisher_breaks <- classIntervals(nonzero_vals, n = 4, style = "fisher", samp_prop = 0.5)$brks
+
+
+# Classify the susceptiblity times suitability raster
+sus_x_suit_class <- app(sxs_thresh_scaled, fun = function(x) {
+  ifelse(x == 0, 0, #no risk is below 1
+         findInterval(x, fisher_breaks, rightmost.closed = TRUE))
+})
+writeRaster(sus_x_suit_class, "Output/data/sus_x_suit_class.tif", overwrite = TRUE)
+sus_x_suit_class <- rast("Output/data/sus_x_suit_class.tif")
+
+names(sus_x_suit_class) <- "Hazard Category"
+levels(sus_x_suit_class) <- data.frame(value = 0:4, riskcat = c("Very Low", "Low", "Moderate", "High", "Very High"))
+
+
+
+```
+
+### Sensitivity analysis
+
+```{r}
+# Classification methods to test
+methods <- c("fisher", "jenks", "equal")
+
+# Function to classify raster
+classify_raster_iteration <- function(method, iter) {
+  
+  # Number of non-zero classes
+  n_classes <- 4
+  
+  # Compute breaks
+  if (method %in% c("fisher","jenks")) {
+    breaks <- classIntervals(nonzero_vals, n = n_classes, style = method, samp_prop = 0.5)$brks
+  } else if (method == "equal") {
+    breaks <- classIntervals(nonzero_vals, n = n_classes, style = "equal")$brks
+  }
+  
+  # Classify raster
+  classified <- app(sxs_thresh_scaled, function(x) {
+    x[is.na(x) | x == 0] <- 0
+    x[x > 0] <- findInterval(x[x > 0], breaks, rightmost.closed = TRUE)
+    return(x)
+  })
+  
+  # Count cells
+  counts <- as.data.frame(terra::freq(classified))
+  counts$iteration <- iter
+  counts$method <- method
+  return(counts)
+}
+
+# Methods and iterations
+methods <- c("fisher", "jenks", "equal")
+n_iter <- 20
+
+# Run iterations for all methods
+sensitivity_df <- map_dfr(methods, function(m) {
+  map_dfr(1:n_iter, ~ classify_raster_iteration(m, .x))
+})
+
+# Label risk categories
+sensitivity_summary <- sensitivity_df |>
+  mutate(
+    riskcat = factor(value, levels = 0:4,
+                     labels = c("Very Low","Low","Moderate","High","Very High"))
+  ) |>
+  group_by(method, iteration, riskcat) |>
+  summarise(cell_count = sum(count), .groups = "drop") |>
+  group_by(method, iteration) |>
+  mutate(percentage = 100 * cell_count / sum(cell_count))
+
+# Compute variance across iterations per method
+class_variance <- sensitivity_summary |>
+  group_by(method, riskcat) |>
+  summarise(
+    mean_pct = mean(percentage),
+    sd_pct = sd(percentage),
+    cv_pct = sd_pct / mean_pct * 100
+  )
+
+# Mean % per category per method
+method_means <- sensitivity_summary |>
+  group_by(method, riskcat) |>
+  summarise(mean_pct = mean(percentage), .groups = "drop")
+
+method_variance <- method_means |>
+  group_by(riskcat) |>
+  summarise(
+    mean_across_methods = mean(mean_pct),
+    sd_across_methods = sd(mean_pct),
+    cv_across_methods = sd_across_methods / mean_across_methods * 100
+  )
+
+# Filter out verylow
+means_noverylow <- method_means |>
+  filter(riskcat != 'Very Low')
+var_noverylow <- class_variance |>
+  filter(riskcat != 'Very Low')
+sensitivity_summary_filtered <- sensitivity_summary |>
+  filter(riskcat != 'Very Low')
+
+# Plot
+ggplot(means_noverylow, aes(x = riskcat, y = mean_pct, fill = method)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(
+    data = var_noverylow,
+    aes(x = riskcat, ymin = mean_pct - sd_pct, ymax = mean_pct + sd_pct),
+    width = 0.2,
+    color = "black",
+    position = position_dodge(width = 0.8)  # match bar dodge
+  ) +
+  labs(
+    x = "Hazard Category",
+    y = "Mean % of Cells",
+    title = "Variance Between Hazard Classification Methods (Excluding Very Low)",
+    fill = "Method"
+  ) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("Output/plots/class_method_sensitivity_col.tiff", width = 10, height = 8, dpi = 300)
+# Boxplot
+ggplot(sensitivity_summary_filtered |> filter(method != "equal"), aes(x = riskcat, y = percentage, fill = method)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  labs(
+    x = "Hazard Category",
+    y = "% of Cells",
+    title = "Distribution of Cell Percentages Across Methods and Iterations",
+    fill = "Method"
+  ) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("Output/plots/class_method_sensitivity_box.tiff", width = 10, height = 8, dpi = 300)
+
+```
+
+### Clipping to states
+
+```{r}
+# ABS States and Territories - 2021 - for state boundaries https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs-edition-3/jul2021-jun2026/access-and-downloads/digital-boundary-files?utm_source=chatgpt.com
+aus_states <- st_read("data/spatial/STE_2021_AUST_GDA2020.shp")
+aus_states <- st_transform(aus_states, crs(sus_x_suit_class))
+
+#State selections
+vic_shp <- aus_states |> 
+  filter(STE_CODE21 == 2) |>
+  summarise(geometry = st_union(geometry))
+
+nsw_shp <- aus_states |> 
+  filter(STE_CODE21 %in% c(1,8)) |>
+  summarise(geometry = st_union(geometry))
+# Split multipolygon into individual polygons
+nsw_parts <- st_cast(nsw_shp, "POLYGON")
+# Remove lord howe island
+nsw_parts <- nsw_parts |>
+  mutate(
+    centroid = st_centroid(geometry),
+    lon = st_coordinates(centroid)[,1],
+    lat = st_coordinates(centroid)[,2]
+  )
+nsw_mainland <- nsw_parts |>
+  filter(lon < 155) |>  # can adjust based on CRS
+  summarise(geometry = st_union(geometry))
+  
+qld_shp <- aus_states |> 
+  filter(STE_CODE21 == 3) |>
+  summarise(geometry = st_union(geometry))
+
+tas_shp <- aus_states |> 
+  filter(STE_CODE21 == 6)|>
+  summarise(geometry = st_union(geometry))
+
+nt_shp <- aus_states |> filter(STE_CODE21 == 7) |>
+  summarise(geometry = st_union(geometry))
+
+# Do eastern states
+# Add identifiers
+nsw_mainland$state <- "NSW and ACT"
+vic_shp$state <- "VIC"
+qld_shp$state <- "QLD"
+tas_shp$state <- "TAS"
+nt_shp$state <- "NT"
+
+qldnsw_shp <- bind_rows(nsw_mainland, qld_shp)
+east_states_shp <- bind_rows(nsw_mainland, vic_shp, qld_shp, tas_shp)
+east_nt_states_shp <- bind_rows(nsw_mainland, vic_shp, qld_shp, tas_shp, nt_shp)
+
+st_write(east_states_shp, "data/processed/east_states_shp.shp")
+
+# No data raster
+mvs_no_data_mask_df <- read_csv("data/processed/mvs_no_data_mask.csv")
+
+# Crop and mask using terra
+# Vic
+vic_sxs <- crop(sus_x_suit_class, vic_shp)
+vic_sxs_clip <- mask(vic_sxs, vic_shp)
+
+
+vic_no_data <- crop(mvs_no_data_mask, vic_shp)
+vic_no_data_clip <- mask(vic_no_data, vic_shp)
+
+# NSW
+nsw_sxs <- crop(sus_x_suit_class, nsw_mainland)
+nsw_sxs_clip <- mask(nsw_sxs, nsw_mainland)
+
+nsw_no_data <- crop(mvs_no_data_mask, nsw_mainland)
+nsw_no_data_clip <- mask(nsw_no_data, nsw_mainland)
+
+# QLD 
+qld_sxs <- crop(sus_x_suit_class, qld_shp)
+qld_sxs_clip <- mask(qld_sxs, qld_shp)
+
+qld_no_data <- crop(mvs_no_data_mask, qld_shp)
+qld_no_data_clip <- mask(qld_no_data, qld_shp)
+
+# Tas
+tas_sxs <- crop(sus_x_suit_class, tas_shp)
+tas_sxs_clip <- mask(tas_sxs, tas_shp)
+
+tas_no_data <- crop(mvs_no_data_mask, tas_shp)
+tas_no_data_clip <- mask(tas_no_data, tas_shp)
+
+# NT 
+nt_sxs <- crop(sus_x_suit_class, nt_shp)
+nt_sxs_clip <- mask(nt_sxs, nt_shp)
+
+nt_no_data <- crop(mvs_no_data_mask, nt_shp)
+nt_no_data_clip <- mask(nt_no_data, nt_shp)
+
+# East
+east_sxs <- crop(sus_x_suit_class, east_states_shp)
+east_sxs_clip <- mask(east_sxs, east_states_shp)
+
+east_no_data <- crop(mvs_no_data_mask, east_states_shp)
+east_no_data_clip <- mask(east_no_data, east_states_shp)
+```
+
+### Categorical visualisations
+
+```{r}
+
+## --- Some visualisations ---
+
+
+# make class df
+df_sxs_class <- as.data.frame(sus_x_suit_class, xy = TRUE, na.rm = TRUE)
+
+write_csv(df_sxs_class, "data/processed/df_sxs_class.csv")
+
+# Mask
+mvs_no_data_mask_df <- read_csv("data/processed/mvs_no_data_mask.csv")
+
+# Aus 
+aus_main_shp <- st_transform(aus_main_shp, crs = crs(sus_x_suit_class))
+
+# --- Australia map ---
+# Plot scaled myrtle rust "danger" across australia
+sxs_class_map <- ggplot() +
+  geom_raster(data = df_sxs_class, aes(x, y, fill = riskcat)) +
+  geom_raster(data = mvs_no_data_mask_df, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  geom_sf(data = aus_main_shp, fill = NA, colour = "black", linewidth = 0.3) +
+  scale_fill_manual(
+    values = c("Very Low" = "#56B4E9",   # sky blue
+             "Low"     = "#009E73",   # bluish green
+             "Moderate"= "#F0E442",   # yellow
+             "High"    = "#E69F00",   # orange
+             "Very High" = "#D55E00"  # vermillion
+               ),
+    name = "Hazard category",
+    na.value = "transparent"
+  ) +
+  
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  
+  
+  coord_sf() +
+  #annotation_scale(location = "bl", width_hint = 0.3) +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank())
+
+sxs_class_map
+
+# --- vic map ---
+
+# dataframe
+df_class_vic <- as.data.frame(vic_sxs_clip, xy = TRUE, na.rm = TRUE)
+df_no_data_vic <- as.data.frame(vic_no_data_clip, xy = TRUE, na.rm = TRUE)
+
+
+vic_class_map <- ggplot() +
+  geom_raster(data = df_class_vic, aes(x, y, fill = riskcat)) +
+  geom_raster(data = df_no_data_vic, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  geom_sf(data = vic_shp, fill = NA, colour = "black", linewidth = 0.6) +
+  scale_fill_manual(
+    values = c("Very Low" = "#56B4E9",   # sky blue
+             "Low"     = "#009E73",   # bluish green
+             "Moderate"= "#F0E442",   # yellow
+             "High"    = "#E69F00",   # orange
+             "Very High" = "#D55E00"  # vermillion
+               ),
+    name = "Hazard category",
+    na.value = "transparent"
+  ) +
+  
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  
+  
+  coord_sf() +
+  annotation_north_arrow(location = "tr", height = unit(1, "in"), width = unit(1, "in"),
+                         which_north = "true", style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+vic_class_map
+
+# --- tas map ---
+
+# dataframe
+df_class_tas <- as.data.frame(tas_sxs_clip, xy = TRUE, na.rm = TRUE)
+df_no_data_tas <- as.data.frame(tas_no_data_clip, xy = TRUE, na.rm = TRUE)
+
+tas_class_map <- ggplot() +
+  geom_raster(data = df_class_tas, aes(x, y, fill = riskcat)) +
+  geom_raster(data = df_no_data_tas, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  geom_sf(data = tas_shp, fill = NA, colour = "black", linewidth = 0.6) +
+  scale_fill_manual(
+    values = c("Very Low" = "#56B4E9",   # sky blue
+             "Low"     = "#009E73",   # bluish green
+             "Moderate"= "#F0E442",   # yellow
+             "High"    = "#E69F00",   # orange
+             "Very High" = "#D55E00"  # vermillion
+               ),
+    name = "Hazard category",
+    na.value = "transparent"
+  ) +
+  
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  
+  
+  coord_sf() +
+  annotation_north_arrow(location = "tr", height = unit(1, "in"), width = unit(1, "in"),
+                         which_north = "true", style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+tas_class_map
+
+# --- qld map ---
+
+# dataframe
+df_class_qld <- as.data.frame(qld_sxs_clip, xy = TRUE, na.rm = TRUE)
+df_no_data_qld <- as.data.frame(qld_no_data_clip, xy = TRUE, na.rm = TRUE)
+
+
+
+qld_class_map <- ggplot() +
+  geom_raster(data = df_class_qld, aes(x, y, fill = riskcat)) +
+  geom_raster(data = df_no_data_qld, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  geom_sf(data = qld_shp, fill = NA, colour = "black", linewidth = 0.3) +
+  scale_fill_manual(
+    values = c("Very Low" = "#56B4E9",   # sky blue
+             "Low"     = "#009E73",   # bluish green
+             "Moderate"= "#F0E442",   # yellow
+             "High"    = "#E69F00",   # orange
+             "Very High" = "#D55E00"  # vermillion
+               ),
+    name = "Hazard category",
+    na.value = "transparent"
+  ) +
+  
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  
+  
+  coord_sf() +
+  annotation_north_arrow(location = "tr", height = unit(1, "in"), width = unit(1, "in"), which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+qld_class_map
+
+
+# --- nsw map ---
+
+# dataframe
+df_class_nsw <- as.data.frame(nsw_sxs_clip, xy = TRUE, na.rm = TRUE)
+df_no_data_nsw <- as.data.frame(nsw_no_data_clip, xy = TRUE, na.rm = TRUE)
+
+
+
+nsw_class_map <- ggplot() +
+  geom_raster(data = df_class_nsw, aes(x, y, fill = riskcat)) +
+  geom_raster(data = df_no_data_nsw, aes(x = x, y = y, alpha = "No data"), fill = "grey80") +
+  geom_sf(data = nsw_mainland, fill = NA, colour = "black", linewidth = 0.3) +
+  scale_fill_manual(
+    values = c("Very Low" = "#56B4E9",   # sky blue
+             "Low"     = "#009E73",   # bluish green
+             "Moderate"= "#F0E442",   # yellow
+             "High"    = "#E69F00",   # orange
+             "Very High" = "#D55E00"  # vermillion
+               ),
+    name = "Hazard category",
+    na.value = "transparent"
+  ) +
+  
+  scale_alpha_manual(
+    values = c("No data" = 0.8),
+    name = NULL
+  ) +
+  
+  
+  coord_sf() +
+  #annotation_scale(location = "bl", width_hint = 0.3, style = "ticks", unit_category = "metric") +
+  annotation_north_arrow(location = "tl", height = unit(1, "in"), width = unit(1, "in"),
+                         which_north = "true", style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+nsw_class_map
+```
+
+# Risk assessment
+
+This portion of the code is the risk assessment. Mammal exposure and vulnerability to myrtle rust is calculated here.
+
+## Proportion of endangered mammal habitat in myrtle rust
+
+```{r}
+# Read fauna geodatabase file
+fauna_sf <- st_read("data/raw/snes_public_gdb.gdb")
+
+# TERRA version
+gdb <- vect("data/raw/snes_public_gdb.gdb")
+gdb_transform <- project(gdb, crs(sus_x_suit_class))
+
+# Put in same CRS as everything else
+fauna_sf <- st_transform(fauna_sf, crs(sus_x_suit_mvs_scaled))
+
+# Filter to only have terrestrial mammals
+mammals_sf <- fauna_sf |> 
+  filter(TAXON_CLASS == "Mammalia") |>
+  filter(!TAXON_ORDER %in% c("Cetacea","Sirenia","Pinnipedia")) 
+
+# Adding a row index to help with calculations
+mammals_sf$ID <- seq_len(nrow(mammals_sf))
+
+# Extract raster values per polygon within gdb
+vals_list <- terra::extract(sus_x_suit_mvs_scaled, vect(mammals_sf))
+
+index_list <- terra::extract(sus_x_suit_class, vect(mammals_sf))
+
+write_csv(vals_list, "data/processed/mamm_val_df.csv", col_names = TRUE)
+vals_list <- read_csv("data/processed/mamm_val_df.csv")
+
+write_csv(index_list, "data/processed/mamm_index_df.csv", col_names = TRUE)
+
+# Calculate counts for each cell value in polygons
+# DEPRECATED
+# counts_MVG <- vals_list |>
+  # group_by(ID, Mrust_val_MVG) |>
+  # summarise(count = n()) |>
+  # ungroup()
+
+counts_MVS <- vals_list |>
+  group_by(ID, Mrust_val_MVS) |>
+  summarise(count = n()) |>
+  ungroup()
+
+# Do it for the categories
+indices_MVS <- index_list |>
+  group_by(ID, riskcat) |>
+  summarise(count = n()) |>
+  ungroup()
+
+# Calculate proportion of habitat with non-zero myrtle rust impact + mean value of myrtle rust exposure within the range
+# DEPRECATED
+# props_MVG <- counts_MVG |>
+#   group_by(ID) |>
+#   summarise(
+#     total = sum(count, na.rm = TRUE),
+#     nonzero = sum(count[`Myrtle rust index MVG` != 0], na.rm = TRUE),
+#     prop_nonzero = nonzero / total,
+#     weighted_mean = weighted.mean(`Myrtle rust index MVG`, count, na.rm = TRUE)
+#   )
+
+props_MVS <- counts_MVS |>
+  group_by(ID) |>
+  summarise(
+    total = sum(count, na.rm = TRUE),
+    nonzero = sum(count[Mrust_val_MVS != 0], na.rm = TRUE),
+    prop_nonzero = nonzero / total,
+    weighted_mean = weighted.mean(Mrust_val_MVS, count, na.rm = TRUE)
+  )
+#####
+# For the index (ONLY FOR MVS)
+# Join to get species and range info
+props_index_MVS <- indices_MVS |>
+  group_by(ID) |>
+  summarise(
+    total = sum(count, na.rm = TRUE),
+    very_high = sum(count[riskcat == "Very High"], na.rm = TRUE),
+    high = sum(count[riskcat == "High"], na.rm = TRUE),
+    perc_high = (high / total) * 100,
+    perc_very_high = (very_high / total) * 100,
+    perc_both = perc_high + perc_very_high
+    )
+#####
+
+
+
+# Join to get species and range info in one table
+
+# DEPRECATED
+# stats_MVG <- props_MVG |>
+#   left_join(st_drop_geometry(mammals_sf)[, c("ID", "LISTED_TAXON_ID", "PRESENCE_RANK", "VERNACULAR_NAME","THREATENED_STATUS","TAXON_FAMILY")], by = "ID")
+
+# DEPRECATED
+# write_csv(stats_MVG, "Output/data/mamm_stats_MVG.csv", col_name = TRUE)
+
+stats_MVS <- props_MVS |>
+  left_join(st_drop_geometry(mammals_sf)[, c("ID", "LISTED_TAXON_ID", "PRESENCE_RANK", "VERNACULAR_NAME","THREATENED_STATUS","TAXON_FAMILY")], by = "ID")
+
+write_csv(stats_MVS, "Output/data/mamm_stats_MVS.csv", col_name = TRUE)
+
+stats_MVS <- read_csv("Output/data/mamm_stats_MVS.csv")
+
+# drop Nas -> habitat not within bounds (e.g. christmas island)
+# Drop possible hbitata also
+stats_MVS_noNA <- stats_MVS |>
+  filter(is.finite(weighted_mean)) |>
+  filter(PRESENCE_RANK != 1) # keeps only mammals likely habitat
+
+# This one is for the index (ONLY MVS)
+mam_classified_stats <- props_index_MVS |>
+  left_join(st_drop_geometry(mammals_sf)[, c("ID", "LISTED_TAXON_ID", "PRESENCE_RANK", "VERNACULAR_NAME","THREATENED_STATUS","TAXON_FAMILY")], by = "ID")
+
+write_csv(mam_classified_stats, "Output/data/mamm_classified_stats_MVS.csv", col_name = TRUE)
+
+mam_classified_stats <- read_csv("Output/data/mamm_classified_stats_MVS.csv")
+
+# cleaning up Nas as above removing chrissy island also
+mam_classified_noNA <- mam_classified_stats  |>
+  filter(total != 1) |>
+  filter(PRESENCE_RANK != 1) # keeps only mammals likely habitat
+```
+
+## Mammal trait data
+
+### Trait analyses
+
+```{r}
+mam_col <- as.data.frame(mammals_sf) |>
+  dplyr::select(LISTED_TAXON_ID, SCIENTIFIC_NAME, VERNACULAR_NAME) |>
+  distinct()
+  
+
+
+write_excel_csv(mam_col, "data/processed/mam_names.csv", col_names = TRUE)
+
+COMB_traits <- read_csv("data/raw/ecy3344-sup-0001-datas1/COMBINE_archives/trait_data_imputed.csv")
+# Clean up combine traits for necessary info
+COMB_traits_small <- COMB_traits |>
+  dplyr::select(iucn2020_binomial, phylacine_binomial, fossoriality, dphy_invertebrate, dphy_vertebrate, dphy_plant, det_fruit, det_nect, det_seed, det_plantother, det_diet_breadth_n, trophic_level, foraging_stratum)
+
+
+# Find species in mammals_sf with no match in COMB_traits
+unmatched_species <- mammals_sf |>
+  anti_join(COMB_traits_small, by = c("BINOMIAL_NAME" = "iucn2020_binomial"))
+mammals_sf <- mammals_sf |>
+  mutate(BINOMIAL_NAME= word(SCIENTIFIC_NAME, 1, 2))
+
+# Check which names are not found on the combine dataset
+unmatched_names <- unique(unmatched_species$SCIENTIFIC_NAME)
+unmatched_names
+
+# Make a tribble of the names of species in the aus dataset which have yet to be updated taxonomically (Notmacropus parma, Osphranter robustus isabellinus, petauroides minor), are unrecognised subspecies on Combine (pteropus melanotus natalis), is sympatric to another species (Rhinolophus reobertsi) or is a binomialisation of a trinomial name (Sminthopsis fuliginosa aitkeni). This allows for them to be selected later. "Antechinus arktos","Antechinus argentus" and "Miniopterus orianae bassanii" simply do not exist on combine in any form. 
+synonyms <- tribble(
+  ~SCIENTIFIC_NAME,                 ~special_binomial,          ~special_source,
+  "Sminthopsis fuliginosa aitkeni", "Sminthopsis aitkeni",      "phylacine_binomial",
+  "Rhinolophus robertsi",           "Rhinolophus philippensis", NA,
+  "Pteropus natalis",               "Pteropus melanotus",       NA, # species-level
+  "Petauroides minor",              "Petauroides volans",       NA,
+  "Notamacropus parma",             "Macropus parma",           NA,
+  "Osphranter robustus isabellinus","Macropus robustus",        NA,
+)
+
+# Accounting for differences in taxonomy
+mammals_sf_adjusted <- mammals_sf |>
+  left_join(synonyms, by = "SCIENTIFIC_NAME") |>
+  mutate(
+    BINOMIAL = word(SCIENTIFIC_NAME, 1, 2),      # default binomial
+    SOURCE   = if_else(!is.na(special_source), 
+                       special_source, "iucn2020_binomial"),
+    BINOMIAL = coalesce(special_binomial, BINOMIAL)  # replace with special name if exists
+  )
+
+# Split into "normal" vs "special" cases
+normal_cases <- mammals_sf_adjusted |> filter(SOURCE == "iucn2020_binomial")
+special_cases <- mammals_sf_adjusted |> filter(SOURCE == "phylacine_binomial")
+
+# Join separately
+normal_join <- normal_cases |>
+  left_join(COMB_traits_small, by = c("BINOMIAL" = "iucn2020_binomial"))
+
+special_join <- special_cases |>
+  left_join(COMB_traits_small, by = c("BINOMIAL" = "phylacine_binomial"))
+
+# Combine back together
+merged_df <- bind_rows(normal_join, special_join)
+
+# Remove unnecessary columns for analysis
+Aus_mams_traits <- st_drop_geometry(merged_df) |>
+  filter(PRESENCE_RANK != 1) |>
+  dplyr::select(-MAP_TAXON_ID, -MIGRATORY_STATUS, -MARINE, -CETACEAN, -PRESENCE_CATEGORY, -PRESENCE_RANK, -EXTRACT_DATE, -TAXON_GROUP, -TAXON_ORDER, -TAXON_CLASS, -TAXON_PHYLUM, -TAXON_KINGDOM, -OTHER_IDS, -CELL_SIZE, -REGIONS, -ATTRIBUTION, -SPRAT_PROFILE, -SHAPE_Length, -SHAPE_Area, -BINOMIAL_NAME, -BINOMIAL, -special_binomial, -special_source, -SOURCE, -phylacine_binomial, -iucn2020_binomial)
+
+
+
+write_excel_csv(as.data.frame(Aus_mams_traits), file = "data/processed/Aus_mam_traits.csv")
+
+# Manual edits done in excel
+# Citation for brush tail rabbit rat
+# Changes were made to how much of each component makes up its diet
+# Firth Ronald S. C., Jefferys Elizabeth, Woinarski John C. Z., Noske Richard A. (2005) The diet of the brush-tailed rabbit-rat (Conilurus penicillatus) from the monsoonal tropics of the Northern Territory, Australia. Wildlife Research 32, 517-523.
+
+# Citations for antechinus arktos
+
+# Habitat:
+# Riordan CE, Pearce C, McDonald BJF, Gynther I, Baker AM. Vegetation structure and ground cover attributes describe the occurrence of a newly discovered carnivorous marsupial on the Tweed Shield Volcano caldera, the endangered black-tailed dusky antechinus (Antechinus arktos). Ecol Evol. 2020; 10: 2104–2121. https://doi.org/10.1002/ece3.6045
+# Diet:
+#Baker, A.M., Mutton, T.Y., Hines, H.B. & Dyck, S.V. (2014) The Black-tailed Antechinus, Antechinus arktos sp. nov.: a new species of carnivorous marsupial from montane regions of the Tweed Volcano caldera, eastern Australia Zootaxa, 3765 (2), 101–133. https://doi.org/10.11646/zootaxa.3765.2.1
+
+# Citations for antechinus argentus
+# Habitat:
+# Plant diversity and structure describe the presence of a new, threatened Australian marsupial within its highly restricted, post-fire habitat Mason ED, Firn J, Hines HB, Baker AM (2017) Plant diversity and structure describe the presence of a new, threatened Australian marsupial within its highly restricted, post-fire habitat. PLOS ONE 12(8): e0182319. https://doi.org/10.1371/journal.pone.0182319
+# Diet:
+# Mason Eugene D., Burwell Chris J., Baker Andrew M. (2015) Prey of the silver-headed antechinus (Antechinus argentus), a new species of Australian dasyurid marsupial. Australian Mammalogy 37, 164-169. https://doi.org/10.1071/AM14036
+
+# Citation for yell-bellied glider and mahogany glider diet edit:
+# The biology of Australian possums and gliders / edited by Ross L. Goldingay and Stephen M. Jackson (2004) Surrey Beatty & Sons https://catalogue.nla.gov.au/catalog/3257384
+
+Aus_mam_traits_edited <- read_csv("data/processed/Aus_mam_traits_edited.csv")
+
+#Summary info for results
+# Filter out species outside study
+mammal_filtered <- Aus_mam_traits_edited |>
+  filter(!SCIENTIFIC_NAME %in% c("Pteropus natalis", "Crocidura trichura"))
+
+# Summary counts
+summary_counts <- mammal_filtered |>
+  summarise(
+    n_species_total = n(),
+    n_families = n_distinct(TAXON_FAMILY),
+    n_arborial_foragers = sum(foraging_stratum == "Ar", na.rm = TRUE),
+    n_plant_dominant = sum(dphy_plant >= 75, na.rm = TRUE)
+  )
+
+# Species count by threatened status
+threat_counts <- mammal_filtered |>
+  count(THREATENED_STATUS, name = "n_species") |>
+  arrange(desc(n_species))
+
+# View results
+summary_counts
+threat_counts
+
+# now for the scoring (just an example idea)
+
+Aus_mam_traits_scored <- Aus_mam_traits_edited |>
+  mutate(
+    score = 0 +
+      if_else(foraging_stratum == "Ar", 1, 0) +
+      if_else(dphy_plant >= 75, 1, 0)
+    )
+
+#Add scores to a new spatial object ready for priotizr 
+# THis new dataset includes only mammals in the "likely habitat" presence category
+mammals_scored_geo <- mammals_sf |>
+  filter(PRESENCE_RANK != 1) |>
+  dplyr::select(LISTED_TAXON_ID, SCIENTIFIC_NAME, THREATENED_STATUS) |>
+  left_join(
+    dplyr::select(Aus_mam_traits_scored, SCIENTIFIC_NAME, score), 
+    by = "SCIENTIFIC_NAME"
+  )
+
+saveRDS(mammals_scored_geo, file = "data/processed/mammals_scored_geo_251003.rds")
+mammals_scored_geo <- readRDS("data/processed/mammals_scored_geo_251003.rds")
+
+# Make a df with all the relevant info for each mammal
+# Attach scores to the stats tables
+stats_MVS_scored <- stats_MVS_noNA |>
+  mutate(LISTED_TAXON_ID = as.character(LISTED_TAXON_ID)) |>
+  left_join(
+    Aus_mam_traits_scored |>
+      mutate(LISTED_TAXON_ID = as.character(LISTED_TAXON_ID)) |>
+      dplyr::select(LISTED_TAXON_ID, SCIENTIFIC_NAME, score),
+    by = "LISTED_TAXON_ID"
+  )
+
+mam_class_scored <- mam_classified_noNA |>
+  mutate(LISTED_TAXON_ID = as.character(LISTED_TAXON_ID)) |>
+  left_join(
+    Aus_mam_traits_scored |>
+      mutate(LISTED_TAXON_ID = as.character(LISTED_TAXON_ID)) |>
+      dplyr::select(LISTED_TAXON_ID, SCIENTIFIC_NAME, score),
+    by = "LISTED_TAXON_ID"
+  )
+
+
+mammal_mega_db <- mam_class_scored |>
+  left_join(
+    stats_MVS_scored |>
+      dplyr::select(LISTED_TAXON_ID, nonzero, prop_nonzero, weighted_mean),
+    by = "LISTED_TAXON_ID"
+  ) |>
+  dplyr::select(
+    ID,
+    LISTED_TAXON_ID, 
+    SCIENTIFIC_NAME, 
+    TAXON_FAMILY, 
+    VERNACULAR_NAME,
+    THREATENED_STATUS,
+    total, 
+    nonzero,
+    weighted_mean, 
+    high, 
+    very_high, 
+    prop_nonzero, 
+    perc_high, 
+    perc_very_high, 
+    perc_both, 
+    score
+  )
+
+write_csv(mammal_mega_db, "Output/data/mammal_mega_db.csv")
+mammal_mega_db <- read_csv("Output/data/mammal_mega_db.csv")
+
+# quick check of scores
+score_counts <- mammal_mega_db |>
+  count(score, name = "n_species") |>
+  arrange(score)
+
+score_counts
+```
+
+### Risky tables
+
+```{r}
+
+# top 20 by proportion in high risk regions
+top20_highrisk <- mammal_mega_db |>
+  arrange(desc(perc_both)) |>
+  slice_head(n = 20) |>
+  dplyr::select(SCIENTIFIC_NAME, perc_both, score) |>
+  mutate(
+    perc_both = round(perc_both, 2)
+    ) |>
+  dplyr::mutate(
+    SCIENTIFIC_NAME = str_wrap(SCIENTIFIC_NAME, width = 26)  # wrap at 20 chars
+  )
+
+# Flextable formatting
+ft_top20_highrisk <- flextable(top20_highrisk) |>
+  # Header labels
+  set_header_labels(
+    SCIENTIFIC_NAME = "Scientific Name",
+    perc_both = "Percent high risk (%)",
+    score = "Score"
+  ) |>
+  
+  # Header styling
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>   # light gray header
+  color(part = "header", color = "black") |>
+  
+  # Zebra striping
+  theme_zebra() |>
+  
+  # Align numeric cols
+  align(j = c("perc_both", "score"), align = "center") |>
+  
+  # Italicise scientific names
+  italic(j = "SCIENTIFIC_NAME") |>
+  
+  # Adjust font size and autofit
+  fontsize(size = 10, part = "all") |>
+  autofit() |>
+  
+  # Add black horizontal lines
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(top20_highrisk), border = fp_border(color="black", width = 1))
+
+ft_top20_highrisk
+
+print(my_doc, target = "Output/plots/top20highrisk.docx")
+
+save_as_image(ft_top20_highrisk, path = "Output/images/top20_highrisk_table.png", zoom = 2)
+
+# top 20 by weighted mean regions
+top20_weightedmean <- mammal_mega_db |>
+  arrange(desc(weighted_mean)) |>
+  slice_head(n = 20) |>
+  dplyr::select(SCIENTIFIC_NAME, weighted_mean, score) |>
+  mutate(
+    weighted_mean = round(weighted_mean, 2)
+    ) |>
+  dplyr::mutate(
+    SCIENTIFIC_NAME = str_wrap(SCIENTIFIC_NAME, width = 26)  # wrap at 20 chars
+  )
+
+# Flextable formatting
+ft_top20_weightedmean <- flextable(top20_weightedmean) |>
+  # Header labels
+  set_header_labels(
+    SCIENTIFIC_NAME = "Scientific Name",
+    weighted_mean = "Weighted Mean",
+    score = "Score"
+  ) |>
+  
+  # Header styling
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>   # light gray header
+  color(part = "header", color = "black") |>
+  
+  # Zebra striping
+  theme_zebra() |>
+  
+  # Align numeric cols
+  align(j = c("weighted_mean", "score"), align = "center") |>
+  
+  # Italicise scientific names
+  italic(j = "SCIENTIFIC_NAME") |>
+  
+  # Adjust font size and autofit
+  fontsize(size = 10, part = "all") |>
+  autofit() |>
+  
+  # Add black horizontal lines
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(top20_weightedmean), border = fp_border(color="black", width = 1))
+
+ft_top20_weightedmean
+
+save_as_image(ft_top20_weightedmean, path = "Output/images/top20_weightedmean_table.png", zoom = 2)
+
+
+# score 2 by weighted mean regions
+top_weightedmean_highscore <- mammal_mega_db |>
+  filter(score == 2) |>
+  arrange(desc(weighted_mean)) |>
+  dplyr::select(SCIENTIFIC_NAME, weighted_mean) |>
+  mutate(
+    weighted_mean = round(weighted_mean, 2)
+    ) |>
+  dplyr::mutate(
+    SCIENTIFIC_NAME = str_wrap(SCIENTIFIC_NAME, width = 26)  # wrap at 20 chars
+  )
+
+# Flextable formatting
+ft_top_weightedmean_highscore <- flextable(top_weightedmean_highscore) |>
+  # Header labels
+  set_header_labels(
+    SCIENTIFIC_NAME = "Scientific Name",
+    weighted_mean = "Weighted Mean"
+  ) |>
+  
+  # Header styling
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>   # light gray header
+  color(part = "header", color = "black") |>
+  
+  # Zebra striping
+  theme_zebra() |>
+  
+  # Align numeric cols
+  align(j = c("weighted_mean"), align = "center") |>
+  
+  # Italicise scientific names
+  italic(j = "SCIENTIFIC_NAME") |>
+  
+  # Adjust font size and autofit
+  fontsize(size = 10, part = "all") |>
+  autofit() |>
+  
+  # Add black horizontal lines
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(top_weightedmean_highscore), border = fp_border(color="black", width = 1))
+
+ft_top_weightedmean_highscore
+
+save_as_image(ft_top20_weightedmean, path = "Output/images/Highscore_weightedmean_table.png", zoom = 2)
+
+
+# score 2 by weighted mean regions
+top_highrisk_highscore <- mammal_mega_db |>
+  filter(score == 2) |>
+  arrange(desc(perc_both)) |>
+  dplyr::select(SCIENTIFIC_NAME, perc_both) |>
+  mutate(
+    perc_both = round(perc_both, 2)
+    ) |>
+  dplyr::mutate(
+    SCIENTIFIC_NAME = str_wrap(SCIENTIFIC_NAME, width = 26)  # wrap at 20 chars
+  )
+  
+
+# Flextable formatting
+ft_top_highrisk_highscore <- flextable(top_highrisk_highscore) |>
+  # Header labels
+  set_header_labels(
+    SCIENTIFIC_NAME = "Scientific Name",
+    perc_both = "Percent high risk (%)"
+  ) |>
+  
+  # Header styling
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>   # light gray header
+  color(part = "header", color = "black") |>
+  
+  # Zebra striping
+  theme_zebra() |>
+  
+  # Align numeric cols
+  align(j = c("perc_both"), align = "center") |>
+  
+  # Italicise scientific names
+  italic(j = "SCIENTIFIC_NAME") |>
+  
+  # Adjust font size and autofit
+  fontsize(size = 10, part = "all") |>
+  autofit() |>
+  
+  # Add black horizontal lines
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(top_highrisk_highscore), border = fp_border(color="black", width = 1))
+
+ft_top_highrisk_highscore
+
+save_as_image(ft_top_highrisk_highscore, path = "Output/images/highscore_highrisk_table.png", zoom = 2)
+
+```
+
+### Risk matrix
+
+```{r}
+# Make a new dataframe to chuck species into based on their exposure level
+heat_df <- mammal_mega_db |>
+  mutate(exposure_class = case_when(
+    perc_both >= 50 ~ "High exposure",
+    perc_both >= 20 ~ "Moderate exposure",
+    perc_both > 0   ~ "Low exposure",
+    TRUE ~ "No exposure"
+  ))
+# Summarise each to find how many within each category
+heat_test <- heat_df |>
+    # Define 3-level risk categorisation
+  mutate(
+    risk_level = case_when(
+      exposure_class == "No exposure" ~ "Low",
+      score == 2 & exposure_class %in% c("High exposure", "Moderate exposure") ~ "High",
+      score == 2 & exposure_class == "Low exposure" ~ "Medium",
+      score == 1 & exposure_class == "High exposure" ~ "High",
+      score == 1 & exposure_class == "Moderate exposure" ~ "Medium",
+      score == 1 & exposure_class == "Low exposure" ~ "Medium",
+      score == 0 & exposure_class == "High exposure" ~ "Medium",
+      TRUE ~ "Low"
+    ),
+
+    risk_level = factor(risk_level, levels = c("Low", "Medium", "High"))
+  )
+
+
+# Summarise each to find how many within each category
+heat_summary <- heat_df |>
+  group_by(score, exposure_class) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(
+    exposure_class = factor(exposure_class,
+      levels = c("No exposure", "Low exposure", "Moderate exposure", "High exposure")
+    ),
+    score = factor(score, levels = c(0, 1, 2))) |>
+  
+  # Create all possible combinations
+  complete(score, exposure_class, fill = list(n = 0)) |>
+
+    # Define 3-level risk categorisation
+  mutate(
+    risk_level = case_when(
+      exposure_class == "No exposure" ~ "Low",
+      score == 2 & exposure_class %in% c("High exposure", "Moderate exposure") ~ "High",
+      score == 2 & exposure_class == "Low exposure" ~ "Medium",
+      score == 1 & exposure_class == "High exposure" ~ "High",
+      score == 1 & exposure_class == "Moderate exposure" ~ "Medium",
+      score == 1 & exposure_class == "Low exposure" ~ "Medium",
+      score == 0 & exposure_class == "High exposure" ~ "Medium",
+      TRUE ~ "Low"
+    ),
+
+    risk_level = factor(risk_level, levels = c("Low", "Medium", "High"))
+  )
+
+# 3-colour palette (green → yellow → red)
+risk_cols <- c(
+  "Low" = "#2ECC71",     # green
+  "Medium" = "#F1C40F",  # yellow
+  "High" = "#E74C3C"     # red
+)
+
+riskmatrix <- ggplot(heat_summary, aes(x = exposure_class, y = score, fill = risk_level)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(aes(label = n), colour = "black", fontface = "bold", size = 7) +
+  scale_fill_manual(values = risk_cols, name = "Risk level") +
+  labs(
+    x = "Exposure class",
+    y = "Vulnerability score"
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    axis.text.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14),
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size = 14),
+  )
+
+ggsave("Output/plots/riskmatrix.png", plot = riskmatrix, width = 10, height = 7, dpi = 300)
+```
+
+### Sensitivity tests
+
+```{r}
+# Define a function that recalculates and summarises for given thresholds
+sensitivity_run <- function(high_cut = 50, moderate_cut = 20, low_cut = 0) {
+  
+  mammal_mega_db |>
+    mutate(exposure_class = case_when(
+      perc_both >= high_cut ~ "High exposure",
+      perc_both >= moderate_cut ~ "Moderate exposure",
+      perc_both > low_cut ~ "Low exposure",
+      TRUE ~ "No exposure"
+    )) |>
+    group_by(score, exposure_class) |>
+    summarise(n = n(), .groups = "drop") |>
+    mutate(
+      exposure_class = factor(exposure_class,
+        levels = c("No exposure", "Low exposure", "Moderate exposure", "High exposure")
+      ),
+      score = factor(score, levels = c(0, 1, 2))
+    ) |>
+    complete(score, exposure_class, fill = list(n = 0)) |>
+    mutate(
+      risk_level = case_when(
+        exposure_class == "No exposure" ~ "Low",
+        score == 2 & exposure_class %in% c("High exposure", "Moderate exposure") ~ "High",
+        score == 2 & exposure_class == "Low exposure" ~ "Medium",
+        score == 1 & exposure_class == "High exposure" ~ "High",
+        score == 1 & exposure_class %in% c("Moderate exposure", "Low exposure") ~ "Medium",
+        score == 0 & exposure_class == "High exposure" ~ "Medium",
+        TRUE ~ "Low"
+      ),
+      risk_level = factor(risk_level, levels = c("Low", "Medium", "High")),
+      high_cut = high_cut,
+      moderate_cut = moderate_cut,
+      low_cut = low_cut
+    )
+}
+
+threshold_grid <- expand.grid(
+  high_cut = c(40, 50, 60),
+  moderate_cut = c(10, 20, 30),
+  low_cut = c(0, 5, 10)
+)
+
+sensitivity_results <- purrr::pmap_dfr(threshold_grid, sensitivity_run)
+
+risk_summary <- sensitivity_results|>
+  group_by(high_cut, moderate_cut, low_cut, risk_level)|>
+  summarise(total_n = sum(n), .groups = "drop")
+
+
+# Extract unique facet values
+low_labels  <- paste0("Low exposure: ", sort(unique(risk_summary$low_cut)), "%")
+names(low_labels) <- sort(unique(risk_summary$low_cut))
+
+high_labels <- paste0("High exposure: ", sort(unique(risk_summary$high_cut)), "%")
+names(high_labels) <- sort(unique(risk_summary$high_cut))
+
+
+ggplot(risk_summary, aes(x = factor(moderate_cut),
+                         y = total_n,
+                         fill = risk_level)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_grid(low_cut ~ high_cut, labeller = labeller(low_cut = as_labeller(low_labels),
+                                                     high_cut = as_labeller(high_labels))) +
+  scale_fill_manual(values = risk_cols,
+                    name = "Risk category") +
+  labs(
+    x = "Moderate threshold (%)",
+    y = "Proportion of species",
+    title = "Sensitivity of risk classification to exposure thresholds",
+    subtitle = "Faceted by low and high exposure cutoffs"
+  ) +
+  theme_classic()
+ggsave("Output/plots/mam_risk_sensitivity.tiff", width = 10, height = 8, dpi = 300)
+
+# --- numeric sensitivity table --- 
+# Define your baseline thresholds
+baseline_high <- 50
+baseline_mod  <- 20
+baseline_low  <- 0
+
+# Extract baseline subset
+baseline <- sensitivity_results|>
+  filter(high_cut == baseline_high,
+         moderate_cut == baseline_mod,
+         low_cut == baseline_low)|>
+  dplyr::select(score, exposure_class, n_baseline = n)
+
+# Compare each threshold combo against baseline
+sensitivity_table <- sensitivity_results|>
+  left_join(baseline, by = c("score", "exposure_class"))|>
+  mutate(
+    n_diff = n - n_baseline,
+    pct_diff = 100 * (n - n_baseline) / pmax(1, n_baseline)  # avoid divide-by-zero
+  )|>
+  group_by(high_cut, moderate_cut, low_cut)|>
+  summarise(
+    total_abs_change = sum(abs(n_diff), na.rm = TRUE),
+    mean_pct_change  = mean(abs(pct_diff), na.rm = TRUE),
+    .groups = "drop"
+  )|>
+  arrange(desc(mean_pct_change))
+
+print(sensitivity_table)
+
+
+```
+
+#### Table with changes
+
+```{r}
+sensitivity_run <- function(high_cut = 50, moderate_cut = 20, low_cut = 0) {
+  mammal_mega_db |>
+    mutate(exposure_class = case_when(
+      perc_both >= high_cut ~ "High exposure",
+      perc_both >= moderate_cut ~ "Moderate exposure",
+      perc_both > low_cut ~ "Low exposure",
+      TRUE ~ "No exposure"
+    )) |>
+    mutate(
+      risk_level = case_when(
+        exposure_class == "No exposure" ~ "Low",
+        score == 2 & exposure_class %in% c("High exposure", "Moderate exposure") ~ "High",
+        score == 2 & exposure_class == "Low exposure" ~ "Medium",
+        score == 1 & exposure_class == "High exposure" ~ "High",
+        score == 1 & exposure_class %in% c("Moderate exposure", "Low exposure") ~ "Medium",
+        score == 0 & exposure_class == "High exposure" ~ "Medium",
+        TRUE ~ "Low"
+      ),
+      high_cut = high_cut,
+      moderate_cut = moderate_cut,
+      low_cut = low_cut
+    )
+}
+
+sensitivity_species <- purrr::pmap_dfr(threshold_grid, sensitivity_run)
+
+
+# --- Baseline combo ---
+baseline_combo <- list(high_cut = 50, moderate_cut = 20, low_cut = 0)
+
+# Extract baseline risk level for each species
+baseline_df <- sensitivity_species |>
+  filter(high_cut == baseline_combo$high_cut,
+         moderate_cut == baseline_combo$moderate_cut,
+         low_cut == baseline_combo$low_cut) |>
+  dplyr::select(SCIENTIFIC_NAME, baseline_risk = risk_level)
+
+# Join baseline with all runs
+species_risk_compare <- sensitivity_species |>
+  left_join(baseline_df, by = "SCIENTIFIC_NAME") |>
+  mutate(
+    movement = case_when(
+      baseline_risk != "High" & risk_level == "High" ~ "Moved INTO High",
+      baseline_risk == "High" & risk_level != "High" ~ "Moved OUT of High",
+      TRUE ~ "No change"
+    )
+  )
+
+# --- Filter only those that changed ---
+species_high_modchange <- species_risk_compare |>
+  filter(movement != "No change") |>
+  group_by(SCIENTIFIC_NAME, moderate_cut, movement) |>
+  summarise(
+    baseline_risk = first(baseline_risk),
+    new_risk = first(risk_level),
+    .groups = "drop"
+  ) |>
+  arrange(moderate_cut)
+
+species_high_modchange
+
+# Create a formatted flextable
+ft_species_riskmove <- flextable(species_high_modchange) |>
+  # Header labels
+  set_header_labels(
+    SCIENTIFIC_NAME = "Scientific Name",
+    moderate_cut = "Moderate threshold (%)",
+    movement = "Movement",
+    baseline_risk = "Original risk",
+    new_risk = "New risk"
+  ) |>
+  
+  # Header styling
+  bold(part = "header") |>
+  bg(part = "header", bg = "#D3D3D3") |>   # light gray header
+  color(part = "header", color = "black") |>
+  
+  # Zebra striping
+  theme_zebra() |>
+  
+  # Align numeric cols
+  align(j = "moderate_cut", align = "center") |>
+  align(j = "movement", align = "center") |>
+  
+  # Italicise scientific names
+  italic(j = "SCIENTIFIC_NAME") |>
+  
+  # Adjust font size and autofit
+  fontsize(size = 10, part = "all") |>
+  autofit() |>
+  
+  # Add black horizontal lines
+  hline_top(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline_bottom(part = "header", border = fp_border(color="black", width = 2)) |>
+  hline(i = 1:nrow(species_high_modchange), border = fp_border(color="black", width = 1))
+
+ft_species_riskmove
+
+# Export to Word
+doc <- read_docx() |>
+  body_add_flextable(ft_species_riskmove)
+
+print(doc, target = "Output/plots/species_highrisk_movement.docx")
+```
+
+### Box plot of families
+
+```{r}
+vals_family <- vals_list |>
+  left_join(
+    stats_MVS_noNA |> 
+      dplyr::select(ID, TAXON_FAMILY),
+    by = "ID") |>
+  filter(!is.na(TAXON_FAMILY))
+
+
+
+fambox <- ggplot(vals_family, aes(x = Mrust_val_MVS, y = fct_reorder(TAXON_FAMILY, Mrust_val_MVS, .fun = median))) +
+  geom_boxplot(
+    colour = "black",
+    alpha = 0.7,
+    fill = "lightyellow",
+    outlier.shape = NA,
+    outlier.fill = "red",
+    outlier.size = 2
+  ) +
+  xlim(0, 45) +
+  labs(
+    x = "Relative myrtle rust hazard intensity",
+    y = "Family"
+  ) +
+  theme(
+    axis.text.y = element_text(size = 10, face = "italic"),
+    axis.text.x = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    panel.grid.major.y = element_blank(),
+    legend.position = "none"
+  )
+
+ggsave("Output/plots/famil_rust_boxplot.png", plot = fambox, width = 9, height = 7, dpi = 300)
+```
+
+### Box plot of score 2
+
+```{r}
+
+# Join exposure values to species info and filter for score = 2
+vals_joined <- vals_list |>
+  left_join(
+    mammal_mega_db |> 
+      dplyr::select(ID, SCIENTIFIC_NAME, score, THREATENED_STATUS),
+    by = "ID"
+  ) |>
+  filter(score == 2, !is.na(Mrust_val_MVS))
+
+vals_species_name <- vals_joined |>
+  mutate(
+    sci_label = case_when(
+      SCIENTIFIC_NAME == "Petaurus australis Wet Tropics subspecies" ~ "<i>Petaurus australis</i> (Wet Tropics)",
+      SCIENTIFIC_NAME == "Phascolarctos cinereus (combined populations of Qld, NSW and the ACT)" ~ "<i>Phascolarctos cinereus</i>^*^",
+      TRUE ~ paste0("<i>", SCIENTIFIC_NAME, "</i>")
+    )
+  )
+
+
+# Plot: one box per species
+ 
+score2box <- ggplot(vals_species_name, aes(
+  x = reorder(str_wrap(sci_label, 20), Mrust_val_MVS, FUN = median),
+  y = Mrust_val_MVS,
+  fill = THREATENED_STATUS
+)) +
+  geom_boxplot(color = "black", outlier.shape = NA, width = 0.7) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(
+      "Critically Endangered" = "#d73025",
+      "Endangered" = "#fc8d59",
+      "Vulnerable" = "#fee090"
+    ),
+    name = "Threatened status"
+  ) +
+  ylim(0, 76) +
+  theme(
+    axis.text.y = element_markdown(size = 10),
+    axis.text.x = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    panel.grid.major.y = element_blank()
+  ) +
+  labs(
+    x = "Scientific name",
+    y = "Relative myrtle rust intensity"
+  )
+
+
+ggsave("Output/plots/score2_rust_boxplot.png", plot = score2box, width = 9, height = 7, dpi = 300)
+```
+
+# PrioritizR
+
+The purpose of using prioritizr is for finding areas of mammal habitat which are highly important for their conservation.
+
+## Data Preparation
+
+### Mammal layer rasterisation
+
+```{r}
+
+
+
+pu <- sxs_thresh_scaled
+
+# Rasterise each mammal feature
+mammal_range <- list()
+mammal_layers <- list() # removed
+mammal_names  <- c()
+skipped_ids <- c()
+scores <- c()
+
+# for loop - rasterising mammal layer
+for (i in seq_len(nrow(mammals_scored_geo))) {
+  
+  print(paste("Starting iteration:", i))
+  
+  m <- mammals_scored_geo[i, ]
+  
+  # Rasterise mammal range (presence = 1, else 0)
+  r <- rasterize(vect(m), pu, field = 1, background = 0)
+  
+  # Intervention: focus on rust hotspots
+  rxr <- r * pu # REDACTED
+  
+  # Check if layer has any non-zero values
+  max_val <- suppressWarnings(global(rxr, "max", na.rm = TRUE)[1,1])
+  has_nonzero <- !is.na(max_val) && max_val > 0
+  
+  if (has_nonzero) {
+    # Construct name
+    nm <- paste0(m$LISTED_TAXON_ID, "_",
+                 gsub(" ", "_", m$SCIENTIFIC_NAME))
+    
+    # Add to lists
+    mammal_range[[length(mammal_layers) + 1]]  <- r
+    mammal_layers[[length(mammal_layers) + 1]] <- rxr
+    mammal_names[length(mammal_names) + 1]     <- nm
+    scores[length(scores) + 1]                 <- m$score
+    
+    cat("✔ Added layer: ", nm)
+  } else {
+    skipped_ids <- c(skipped_ids, m$LISTED_TAXON_ID)
+    cat("⚠ Skipped: ", m$SCIENTIFIC_NAME, " (", m$LISTED_TAXON_ID, ")")
+  }
+}
+# --- Summary report ---
+cat("\n===== SUMMARY =====\n")
+cat("✔", length(mammal_layers), "species added\n")
+cat("⚠", length(skipped_ids), "species skipped\n")
+if (length(skipped_ids) > 0) {
+  cat("Skipped IDs:", paste(skipped_ids, collapse = ", "), "\n")
+}
+
+saveRDS(scores, file = "data/processed/score_list.rds")
+scores <- readRDS("data/processed/score_list.rds")
+
+# write each mammal range layer to disk to prevent crash
+files <- vapply(seq_along(mammal_range), function(i) {
+  f <- file.path("data/processed/mam_rast_layers", paste0("layer_", i, ".tif"))
+  writeRaster(mammal_range[[i]], f, overwrite = TRUE)
+  f
+}, character(1))
+
+# Write each mammal x rust layer to disk
+files2 <- vapply(seq_along(mammal_layers), function(i) {
+  f2 <- file.path("data/processed/mamxrust_rast_layers", paste0("layer_", i, ".tif"))
+  writeRaster(mammal_layers[[i]], f2, overwrite = TRUE)
+  f2
+}, character(1))
+
+
+# load in files
+files <- list.files("data/processed/mam_rast_layers", 
+                    pattern = "\\.tif$", 
+                    full.names = TRUE)
+
+files2 <- list.files("data/processed/mamxrust_rast_layers", 
+                    pattern = "\\.tif$", 
+                    full.names = TRUE)
+
+# Now store both as SPatRAster stacks
+mammal_stack <- rast(files)
+names(mammal_stack) <- mammal_names
+
+writeRaster(mammal_stack, "data/processed/prioritizr_mammal_stack_250916.tif", overwrite =TRUE)
+
+mammal_stack <- rast("data/processed/prioritizr_mammal_stack_250916.tif")
+masked_mammal_ranges <- mask(mammal_stack, sus_x_suit_mvs_scaled)
+
+# Targets - needs to be a rep per species - 30 percent based on government stuff
+t1 <- rep(0.3, nlyr(mammal_stack))
+
+# --- file naming stuff ---
+# Function to save an object with its name in the filename
+save_with_name <- function(object, suffix = "min_short") {
+  current_date <- Sys.Date()
+  formatted_date <- format(current_date, "%y%m%d")
+  
+  obj_name <- deparse(substitute(object))  # get the object name as a string
+  dir_path <- "Output/data/Prioritizr/"
+  filename <- paste0(dir_path, formatted_date, "_", obj_name, "_", suffix, ".rds")
+  
+  saveRDS(object, filename)
+  message("Saved as: ", filename)
+}
+```
+
+### Costs and budgeting
+
+```{r}
+# ---- Weighted costs----
+# total combined mammal range raster
+mammals_real <- max(mammal_stack, na.rm = TRUE)
+# make 0s in mammal_real na
+mammals_real_NA <- ifel(mammals_real == 0, NA, 1)
+# multiply with myrtle rust cutoff (NA where there's theoretically no rust) to get weighted cost
+norustnocost_raw <- mask(sxs_thresh_scaled, sus_x_suit_mvs_scaled)
+# everywhere there is a mammal pop in the the myrtle rust value
+weighted_cost <- (mammals_real_NA * norustnocost_raw) * 0.01
+names(weighted_cost) <- "cost"
+
+# ---- biased costs ----
+# this one appoints areas with rust as being lower cost
+biased_cost <- (1 / (1 + weighted_cost)) * 0.1
+
+negative_cost = -weighted_cost
+exp(negative_cost)
+
+# ---- uniform cost layer ----
+norustnocost_1 <- ifel(sxs_thresh_scaled == 0, 0, 1)
+uniform_cost <- (mammals_real_NA * norustnocost_1) * 0.01
+names(uniform_cost) <- "cost"
+
+## ----- Budgeting and locking in -----
+
+## Uniform
+# sum
+uniform_cost_values <- values(uniform_cost)
+b_uniform <- sum(uniform_cost_values, na.rm = TRUE) - 1 #Add -1 to ensure budget is less than cost
+# Uniform cost budget which is 10% of total costs
+b_uniform_perc <- b_uniform * 0.1
+
+
+# locking in cells
+uniform_lockin <- which(uniform_cost_values == 0)
+# create a lock in raster 
+lockin_rast <- rast(uniform_cost)
+values(lockin_rast) <- 0
+values(lockin_rast)[uniform_lockin] <- 1   # set locked-in cells
+lockin_rast <- mask(lockin_rast, uniform_cost)
+
+
+## Weighted
+# sum
+weighted_cost_values <- values(weighted_cost)
+b_weighted <- sum(weighted_cost_values, na.rm = TRUE) - mean(weighted_cost_values, na.rm = TRUE)
+# locked in cells
+weighted_lockin <- which(weighted_cost_values == 0)
+
+## Biased
+# sum
+biased_cost_values <- values(biased_cost)
+b_biased <- sum(biased_cost_values, na.rm = TRUE) - mean(biased_cost_values, na.rm = TRUE)
+
+#locked in cells
+biased_locking <- which(biased_cost_values == 0.1)
+```
+
+## Prioritisation scenarios
+
+### DEPRECATED - Scenario 1: Uniform Cost + Unranked features -
+
+```{r}
+# # ----- SCENARIO 1: Uniform Cost + Unweighted and unranked features -----
+# # More complicated objective - works well 
+# p1_0.3 <- problem(uniform_cost, mammal_stack, run_checks = TRUE) |>
+#   add_min_shortfall_objective(budget = b_uniform) |>
+#   add_relative_targets(t1) |>
+#   add_locked_in_constraints(lockin_rast) |>
+#   #add_feature_weights(mammals_scored_geo$score[1:nlyr(features_masked)]) |> # The weights make a big difference
+#   add_binary_decisions() |>
+#   add_gurobi_solver(gap = 0.1)
+# 
+# # Create a filename with the custom formatted date
+# save_with_name(p1_0.3)
+# 
+# # Solve & importance
+# s1_0.3 <- solve(p1_0.3)
+# summary(s1_0.3) # this is telling me its one everywhere - whacky 
+# 
+# # Create a filename with the custom formatted date
+# save_with_name(s1_0.3)
+# 
+# 
+# # imp <- eval_replacement_importance(p, s) This takes bloody forever
+# imp1_0.3 <- eval_rank_importance(p1_0.3, s1_0.3, n=100) # This is quick
+# save_with_name(imp1_0.3)
+# 
+# # Quick plots to check
+# plot(s1_0.3, main="Scenario 1: Intervention scenario (focus on rust hotspots)")
+# plot(imp1_0.3, main="Scenario 1: Rank importance")
+```
+
+### DEPRECATED - Scenario 2: Weighted Cost + Unranked features
+
+`{# {r} # # ----- SCENARIO 2: Weighted Cost + Unweighted and unranked features ----- # # More complicated objective - works well  # p2_0.3 <- problem(weighted_cost, mammal_stack, run_checks = TRUE) |> #   add_min_shortfall_objective(budget = b_weighted) |> #   add_relative_targets(t1) |> #   add_locked_in_constraints(weighted_lockin) |> #   #add_feature_weights(mammals_scored_geo$score[1:nlyr(features_masked)]) |> # The weights make a big difference #   add_binary_decisions() |> #   add_gurobi_solver(gap = 0.1) #  # save_with_name(p2_0.3) #  # # Solve & importance # s2_0.3 <- solve(p2) # summary(s2)  # save_with_name(s2_0.3) #  #  # # imp <- eval_replacement_importance(p, s) This takes bloody forever # imp2_0.3 <- eval_rank_importance(p2, s2, n=100) # This is quick #  #  # # Quick plots to check # plot(s2, main="Scenario 2: Intervention scenario (focus on rust hotspots)") # plot(imp2, main="Scenario 2: Rank importance")`
+
+### Scenario 3: Uniform Cost + Ranked features
+
+```{r}
+# ----- SCENARIO 3: Uniform Cost + Weighted features -----
+# More complicated objective - works well 
+p3_0.3 <- problem(uniform_cost, mammal_stack, run_checks = TRUE) |>
+  add_min_shortfall_objective(budget = b_uniform) |>
+  add_relative_targets(t1) |>
+  add_locked_in_constraints(uniform_lockin) |>
+  add_feature_weights(scores) |> # The weights make a big difference
+  add_binary_decisions() |>
+  add_gurobi_solver(gap = 0.1)
+
+save_with_name(p3_0.3)
+
+# Solve & importance
+s3_0.3 <- solve(p3_0.3)
+summary(s3_0.3) 
+save_with_name(s3_0.3)
+
+# imp <- eval_replacement_importance(p, s) This takes bloody forever
+imp3_0.3 <- eval_rank_importance(p3_0.3, s3_0.3, n=100) # This is quick
+save_with_name(imp3_0.3)
+
+# Quick plots to check
+plot(s3_0.3, main="Scenario 3: Intervention scenario (focus on rust hotspots)")
+plot(imp3_0.3, main="Scenario 3: Rank importance")
+
+```
+
+### Scenario 4: Weighted Cost + Ranked features
+
+```{r}
+# ----- SCENARIO 4: Weighted Cost + Weighted features -----
+# More complicated objective - works well 
+p4_0.3 <- problem(weighted_cost, mammal_stack, run_checks = TRUE) |>
+  add_min_shortfall_objective(budget = b_weighted) |>
+  add_relative_targets(t1) |>
+  add_locked_in_constraints(weighted_lockin) |>
+  add_feature_weights(scores) |> # The weights make a big difference
+  add_binary_decisions() |>
+  add_gurobi_solver(gap = 0.1)
+
+save_with_name(p4_0.3)
+
+# Solve & importance
+s4_0.3 <- solve(p4_0.3)
+summary(s4_0.3) 
+
+save_with_name(s4_0.3)
+
+# imp <- eval_replacement_importance(p, s) This takes bloody forever
+imp4_0.3 <- eval_rank_importance(p4_0.3, s4_0.3, n=100) # This is quick
+save_with_name(imp4_0.3)
+
+# Quick plots to check
+plot(s4_0.3, main="Scenario 4: Intervention scenario (focus on rust hotspots)")
+plot(imp4_0.3, main="Scenario 4: Rank importance")
+```
+
+### DEPRECATED - Scenario 5: Biased Cost + Unranked features - DEPRECATED
+
+```{r}
+# # More complicated objective - works well 
+# 
+# p5 <- problem(biased_cost, mammal_stack, run_checks = TRUE) |>
+#   add_min_shortfall_objective(budget = b_biased) |>
+#   add_relative_targets(t1) |>
+#   #add_feature_weights(scores) |> # The weights make a big difference
+#   add_binary_decisions() |>
+#   add_gurobi_solver(gap = 0.1)
+# 
+# saveRDS(p5, file = "Output/data/Pioritizr/250922_p5_min_short.rds")
+# 
+# # Solve & importance
+# s5 <- solve(p5)
+# summary(s5) # this is telling me its one everywhere - whacky 
+# saveRDS(s5, file = "Output/data/Pioritizr/250922_s5_min_short.rds")
+# 
+# 
+# # imp <- eval_replacement_importance(p, s) This takes bloody forever
+# imp5 <- eval_rank_importance(p5, s5, n=100) # This is quick
+# saveRDS(imp5, file = "Output/data/Pioritizr/250922_imp5_min_short.rds")
+# 
+# # Quick plots to check
+# plot(s5, main="Scenario 5: Intervention scenario (focus on rust hotspots)")
+# plot(imp5, main="Scenario 5: Rank importance")
+```
+
+### Scenario 6: Biased Cost + Ranked features
+
+```{r}
+p6_0.3 <- problem(biased_cost, mammal_stack, run_checks = TRUE) |>
+  add_min_shortfall_objective(budget = b_biased) |>
+  add_relative_targets(t1) |>
+  add_locked_in_constraints(biased_locking) |>
+  add_feature_weights(scores) |> # The weights make a big difference
+  add_binary_decisions() |>
+  add_gurobi_solver(gap = 0.1)
+
+save_with_name(p6_0.3)
+
+# Solve & importance
+s6_0.3 <- solve(p6_0.3)
+summary(s6_0.3) # this is telling me its one everywhere - whacky 
+
+save_with_name(s6_0.3)
+
+# imp <- eval_replacement_importance(p, s) This takes bloody forever
+imp6_0.3 <- eval_rank_importance(p6_0.3, s6_0.3, n=100) # This is quick
+
+save_with_name(imp6_0.3)
+
+# Quick plots to check
+plot(s6_0.3, main="Scenario 6: Intervention scenario (focus on rust hotspots)")
+plot(imp6_0.3, main="Scenario 6: Rank importance")
+```
+
+### Scenario 7: Penalty test
+
+```{r}
+# More complicated objective - works well 
+p_penalty <- problem(uniform_cost, mammal_stack, run_checks = TRUE) |>
+  add_min_shortfall_objective(budget = b_uniform) |>
+  add_relative_targets(t1) |>
+  add_locked_in_constraints(uniform_lockin) |>
+  add_feature_weights(scores) |> # The weights make a big difference
+  add_locked_in_constraints(uniform_lockin) |>
+  add_linear_penalties(penalty = 100, data = negative_cost) |>
+  add_binary_decisions() |>
+  add_gurobi_solver(gap = 0.1)
+
+#p_penalty <- readRDS("Output/data/Prioritizr/251010_p_penalty_min_short.rds")
+save_with_name(p_penalty)
+
+# Solve & importance
+s_penalty <- solve(p_penalty)
+summary(s_penalty) 
+
+save_with_name(s_penalty)
+
+# imp <- eval_replacement_importance(p, s) This takes bloody forever
+imp_penalty <- eval_rank_importance(p_penalty, s_penalty, n=100) # This is quick
+
+
+save_with_name(imp_penalty)
+
+plot(imp_penalty)
+
+
+```
+
+### Visualisations
+
+```{r, warning = FALSE}
+
+# Load in all importance rasters from file
+imp_penalty <- readRDS("Output/data/Prioritizr/251014_imp_penalty_min_short.rds")
+imp6_0.3 <- readRDS("Output/data/Prioritizr/251014_imp6_0.3_min_short.rds")
+imp4_0.3 <- readRDS("Output/data/Prioritizr/251014_imp4_0.3_min_short.rds")
+imp3_0.3 <- readRDS("Output/data/Prioritizr/251010_imp3_0.3_min_short.rds")
+
+# Load in shapefule
+east_states_shp <- st_read("data/processed/east_states_shp.shp")
+east_states_shp_wgs84 <- st_transform(east_states_shp, crs(lockin_rast))
+
+# Project all to Albers Equal area EPSG:3577 for plotting
+lock_overlay <- project(lockin_rast, sxs_alb, method = "near")
+impp_alb <- project(imp_penalty, lock_overlay)
+imp6_alb <- project(imp6_0.3, lock_overlay)
+imp4_alb <- project(imp4_0.3, lock_overlay)
+imp3_alb <- project(imp3_0.3, lock_overlay)
+
+
+# Crop all to Australian east states shapefile
+impp_east <- crop(imp_penalty, east_states_shp_wgs84)
+imp6_east <- crop(imp6_0.3, east_states_shp_wgs84)
+imp4_east <- crop(imp4_0.3, east_states_shp_wgs84)
+imp3_east <- crop(imp3_0.3, east_states_shp_wgs84)
+lock_overlay_east <- crop(lockin_rast, east_states_shp_wgs84)
+
+# Mask by states
+impp_east <- mask(impp_east, east_states_shp_wgs84)
+imp6_east <- mask(imp6_east, east_states_shp_wgs84)
+imp4_east <- mask(imp4_east, east_states_shp_wgs84)
+imp3_east <- mask(imp3_east, east_states_shp_wgs84)
+overlay_east <- mask(lock_overlay_east, east_states_shp_wgs84)
+
+# raster dataframes for GG
+# Penalty importance
+df_impp <- as.data.frame(impp_east, xy = TRUE, na.rm = TRUE)
+# df_impp$x <- round(df_impp$x, 0)
+# df_impp$y <- round(df_impp$y, 0)
+# Scenario 6 importance
+df_imp6 <- as.data.frame(imp6_east, xy = TRUE, na.rm = TRUE)
+# df_imp6$x <- round(df_imp6$x, 0)
+# df_imp6$y <- round(df_imp6$y, 0)
+# Scenario 4 importance
+df_imp4 <- as.data.frame(imp4_east, xy = TRUE, na.rm = TRUE)
+# df_imp4$x <- round(df_imp4$x, 0)
+# df_imp4$y <- round(df_imp4$y, 0)
+# Scenario 3 importance
+df_imp3 <- as.data.frame(imp3_east, xy = TRUE, na.rm = TRUE)
+# df_imp3$x <- round(df_imp3$x, 0)
+# df_imp3$y <- round(df_imp3$y, 0)
+# Overlay
+df_overlay <- as.data.frame(overlay_east, xy = TRUE, na.rm = TRUE)
+
+# Simplify lines on states
+states_simplified <- st_simplify(east_states_shp, dTolerance = 1000)
+states_simplified <- st_simplify(east_states_shp_wgs84, dTolerance = 1000)
+
+p_impp <- ggplot() +
+  geom_sf(data = states_simplified, fill = "white", colour = NA, linewidth = 0, lineend = "round", linejoin = "round") +
+  geom_raster(data = df_impp, aes(x, y, fill = rs)) +
+  geom_raster(data = subset(df_overlay, cost == 1), aes(x = x, y = y), fill = "grey80", alpha = 1) +
+  geom_sf(data = states_simplified, fill = NA, colour = "black", linewidth = 0.15, lineend = "round", linejoin = "round") +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Importance",
+    values = scales::rescale(c(0.0, 0.20, 0.50, 0.70, 0.9, 1.00)),
+    na.value = "transparent"
+  ) +
+  coord_sf(expand = TRUE) +
+  labs(title = "Uniform cost with penalty") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+p_impp
+
+p_imp6 <- ggplot() +
+  geom_sf(data = states_simplified, fill = "white", colour = NA, linewidth = 0, lineend = "round", linejoin = "round") +
+  geom_raster(data = df_imp6, aes(x, y, fill = rs)) +
+  geom_raster(data = subset(df_overlay, cost == 1), aes(x = x, y = y), fill = "grey80", alpha = 1) +
+  geom_sf(data = states_simplified, fill = NA, colour = "black", linewidth = 0.15, lineend = "round", linejoin = "round") +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Importance",
+    values = scales::rescale(c(0.0, 0.20, 0.50, 0.70, 0.9, 1.00)),
+    na.value = "transparent"
+  ) +
+  coord_sf(expand = TRUE) +
+  labs(title = "Biased cost") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+p_imp6
+
+p_imp4 <- ggplot() +
+  geom_sf(data = states_simplified, fill = "white", colour = NA, linewidth = 0, lineend = "round", linejoin = "round") +
+  geom_raster(data = df_imp4, aes(x, y, fill = rs)) +
+  geom_raster(data = subset(df_overlay, cost == 1), aes(x = x, y = y), fill = "grey80", alpha = 1) +
+  geom_sf(data = states_simplified, fill = NA, colour = "black", linewidth = 0.15, lineend = "round", linejoin = "round") +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Importance",
+    values = scales::rescale(c(0.0, 0.20, 0.50, 0.70, 0.9, 1.00)),
+    na.value = "transparent"
+  ) +
+  coord_sf(expand = TRUE) +
+  labs(title = "Rust weighted cost") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+p_imp4
+
+p_imp3 <- ggplot() +
+  geom_sf(data = states_simplified, fill = "white", colour = NA, linewidth = 0, lineend = "round", linejoin = "round") +
+  geom_raster(data = df_imp3, aes(x, y, fill = rs)) +
+  geom_raster(data = subset(df_overlay, cost == 1), aes(x = x, y = y), fill = "grey80", alpha = 1) +
+  geom_sf(data = states_simplified, fill = NA, colour = "black", linewidth = 0.15, lineend = "round", linejoin = "round") +
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Importance",
+    values = scales::rescale(c(0.0, 0.20, 0.50, 0.70, 0.9, 1.00)),
+    na.value = "transparent"
+  ) +
+  coord_sf(expand = TRUE) +
+  labs(title = "Uniform cost") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        panel.grid.major = element_line(color = "grey50"))
+
+p_imp3
+
+combo_plot <- ((p_imp3 + p_impp) / (p_imp4 + p_imp6)) +
+   plot_layout(
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "right",
+    legend.justification = "center",
+    legend.text = element_text(size = 11),
+    legend.title = element_text(size = 13),
+    legend.key.height = unit(1.3, "cm"),
+    legend.key.width = unit(1, "cm"),
+    legend.box.spacing = unit(-2.3, "cm"),
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+
+combo_plot
+ggsave("Output/plots/combo_importance.tiff",
+       combo_plot, width = 10, height = 14, dpi = 300)
+```
