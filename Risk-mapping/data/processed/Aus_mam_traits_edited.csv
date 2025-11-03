@@ -1,0 +1,104 @@
+﻿LISTED_TAXON_ID,SCIENTIFIC_NAME,VERNACULAR_NAME,THREATENED_STATUS,TAXON_FAMILY,fossoriality,dphy_invertebrate,dphy_vertebrate,dphy_plant,det_fruit,det_nect,det_seed,det_plantother,det_diet_breadth_n,trophic_level,foraging_stratum
+68,Zyzomys pedunculatus,"Central Rock-rat, Antina",Critically Endangered,Muridae,1,10,0,90,0,0,0,90,1,1,G
+66,Xeromys myoides,"Water Mouse, False Water Rat, Yirrkoo",Vulnerable,Muridae,1,40,40,20,0,0,0,20,4,2,G
+132,Conilurus penicillatus,"Brush-tailed Rabbit-rat, Brush-tailed Tree-rat, Pakooma",Vulnerable,Muridae,2,2,0,98,0,0,68,29,3,2,Ar
+137,Leporillus conditor,"Wopilkara, Greater Stick-nest Rat",Vulnerable,Muridae,1,0,0,100,0,0,0,100,1,1,G
+174,Macroderma gigas,Ghost Bat,Vulnerable,Megadermatidae,2,20,80,0,0,0,0,0,2,3,G
+180,Hipposideros semoni,"Semon's Leaf-nosed Bat, Greater Wart-nosed Horseshoe-bat",Vulnerable,Hipposideridae,2,100,0,0,0,0,0,0,1,3,A
+183,Chalinolobus dwyeri,"Large-eared Pied Bat, Large Pied Bat",Endangered,Vespertilionidae,2,100,0,0,0,0,0,0,1,3,A
+185,Pteropus conspicillatus,Spectacled Flying-fox,Endangered,Pteropodidae,2,0,0,100,100,0,0,0,1,1,Ar
+186,Pteropus poliocephalus,Grey-headed Flying-fox,Vulnerable,Pteropodidae,2,0,0,100,100,0,0,0,1,1,Ar
+198,Lasiorhinus krefftii,"Northern Hairy-nosed Wombat, Yaminon",Critically Endangered,Vombatidae,1,0,0,100,0,0,0,100,1,1,G
+214,Bettongia tropica,Northern Bettong,Endangered,Potoroidae,1,10,0,90,0,0,10,80,1,2,G
+77,Pseudomys shortridgei,"Heath Mouse, Dayang, Heath Rat",Endangered,Muridae,1,20,0,80,0,0,30,50,3,2,G
+329,Dasyuroides byrnei,"Kowari, brushy-tailed marsupial rat, Byrne's crest-tailed marsupial rat",Endangered,Dasyuridae,1,30,70,0,0,0,0,0,2,3,G
+330,Dasyurus geoffroii,"Chuditch, Western Quoll",Vulnerable,Dasyuridae,1,60,40,0,0,0,0,0,2,3,G
+302,Sminthopsis butleri,Butler's Dunnart,Vulnerable,Dasyuridae,1,80,20,0,0,0,0,0,1,3,G
+305,Sminthopsis douglasi,Julia Creek Dunnart,Vulnerable,Dasyuridae,1,80,20,0,0,0,0,0,1,3,G
+313,Parantechinus apicalis,Dibbler,Endangered,Dasyuridae,1,70,0,30,0,30,0,0,2,3,Ar
+316,Phascogale calura,"Red-tailed Phascogale, Red-tailed Wambenger, Kenngoor",Vulnerable,Dasyuridae,2,30,70,0,0,0,0,0,3,2,Ar
+123,Notomys aquilo,"Northern Hopping-mouse, Woorrentinta",Endangered,Muridae,1,0,0,100,40,0,30,30,3,1,G
+113,Pseudomys fieldi,"Shark Bay Mouse, Djoongari, Alice Springs Mouse",Vulnerable,Muridae,1,20,0,80,0,0,30,50,3,2,G
+125,Notomys fuscus,"Dusky Hopping-mouse, Wilkiniti",Vulnerable,Muridae,1,0,0,100,40,0,30,30,3,1,G
+294,Myrmecobius fasciatus,Numbat,Endangered,Myrmecobiidae,1,100,0,0,0,0,0,0,1,3,G
+299,Sarcophilus harrisii,Tasmanian Devil,Endangered,Dasyuridae,1,0,100,0,0,0,0,0,1,3,G
+96,Pseudomys novaehollandiae,"New Holland Mouse, Pookila",Vulnerable,Muridae,1,20,0,80,0,0,30,50,3,2,G
+98,Pseudomys oralis,"Hastings River Mouse, Koontoo",Endangered,Muridae,1,20,0,80,0,0,30,50,3,2,G
+99,Pseudomys pilligaensis,"Pilliga Mouse, Poolkoo",Vulnerable,Muridae,1,20,0,80,0,0,30,50,3,2,G
+254,Petauroides volans,Greater Glider (southern and central),Endangered,Pseudocheiridae,2,0,0,100,0,0,0,100,1,1,Ar
+88,Pseudomys fumeus,"Smoky Mouse, Konoom",Endangered,Muridae,1,20,0,80,0,0,30,50,3,1,G
+108,Pseudomys australis,"Plains Rat, Palyoora, Plains Mouse",Vulnerable,Muridae,1,20,0,80,0,0,30,50,3,2,G
+331,Dasyurus hallucatus,"Northern Quoll, Digul [Gogo-Yimidir], Wijingadda [Dambimangari], Wiminji [Martu]",Endangered,Dasyuridae,1,40,50,10,10,0,0,0,3,3,G
+333,Dasyurus viverrinus,"Eastern Quoll, Luaner",Endangered,Dasyuridae,1,70,30,0,0,0,0,0,2,2,G
+217,Potorous longipes,Long-footed Potoroo,Endangered,Potoroidae,1,20,0,80,0,0,0,80,2,2,G
+225,Petrogale penicillata,Brush-tailed Rock-wallaby,Vulnerable,Macropodidae,1,0,0,100,20,0,10,70,2,1,G
+226,Petrogale persephone,Proserpine Rock-wallaby,Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+229,Setonix brachyurus,Quokka,Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+239,Onychogalea fraenata,"Bridled Nail-tail Wallaby, Bridled Nailtail Wallaby",Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+273,Gymnobelideus leadbeateri,Leadbeater's Possum,Critically Endangered,Petauridae,2,50,0,50,0,50,0,0,2,2,Ar
+278,Perameles bougainville,Shark Bay Bandicoot,Endangered,Peramelidae,1,70,20,10,0,0,0,10,1,2,G
+282,Macrotis lagotis,Greater Bilby,Vulnerable,Thylacomyidae,1,70,20,10,0,0,0,10,2,1,G
+291,Sminthopsis psammophila,Sandhill Dunnart,Endangered,Dasyuridae,1,80,20,0,0,0,0,0,1,3,G
+344,Antechinus bellus,Fawn Antechinus,Vulnerable,Dasyuridae,1,90,10,0,0,0,0,0,1,3,G
+267,Burramys parvus,Mountain Pygmy-possum,Endangered,Burramyidae,2,40,0,60,30,0,30,0,3,2,Ar
+59278,Petrogale coenensis,Cape York Rock-wallaby,Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+59281,Petrogale sharmani,"Mount Claro Rock Wallaby, Sharman's Rock Wallaby",Vulnerable,Macropodidae,1,20,0,80,0,0,0,80,2,2,G
+87645,Miniopterus orianae bassanii,Southern Bent-wing Bat,Critically Endangered,Miniopteridae,2,100,0,0,0,0,0,0,1,3,A
+86367,Potorous tridactylus trisulcatus,Long-nosed Potoroo (southern mainland),Vulnerable,Potoroidae,1,20,0,80,0,0,0,80,2,2,G
+87619,Mesembriomys gouldii melvillensis,Black-footed Tree-rat (Melville Island),Vulnerable,Muridae,2,20,0,80,0,80,0,0,2,2,Ar
+87620,Mesembriomys gouldii rattoides,"Black-footed Tree-rat (north Queensland), Shaggy Rabbit-rat",Vulnerable,Muridae,2,20,0,80,0,80,0,0,2,2,Ar
+87600,Petaurus australis australis,Yellow-bellied Glider (south-eastern),Vulnerable,Petauridae,2,25,0,75,0,30,20,25,3,2,Ar
+87606,Petrogale concinna canescens,Nabarlek (Top End),Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+87607,Petrogale concinna monastria,Nabarlek (Kimberley),Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+87608,Petrogale xanthopus celeris,Yellow-footed Rock-wallaby (central-western Queensland),Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+87639,Rhinolophus robertsi,"Large-eared Horseshoe Bat, Greater Large-eared Horseshoe Bat",Vulnerable,Rhinolophidae,2,100,0,0,0,0,0,0,1,3,A
+66659,Bettongia lesueur lesueur,"Burrowing Bettong (Shark Bay), Boodie",Vulnerable,Potoroidae,1,0,0,100,0,0,30,70,2,2,G
+87617,Mastacomys fuscus mordicus,"Broad-toothed Rat (mainland), Tooarrana",Endangered,Muridae,1,20,0,80,0,0,30,50,3,1,G
+66661,Lagorchestes conspicillatus conspicillatus,Spectacled Hare-wallaby (Barrow Island),Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+87618,Mesembriomys gouldii gouldii,"Black-footed Tree-rat (Kimberley and mainland Northern Territory), Djintamoonga, Manbul",Endangered,Muridae,2,20,0,80,0,80,0,0,2,2,Ar
+87611,Pteropus natalis,"Christmas Island Flying-fox, Christmas Island Fruit-bat",Critically Endangered,Pteropodidae,2,0,0,100,100,0,0,0,1,1,Ar
+66642,Potorous gilbertii,"Gilbert's Potoroo, Ngilkat",Critically Endangered,Potoroidae,1,20,0,80,0,0,0,80,2,1,G
+88020,Perameles gunnii Victorian subspecies,Eastern Barred Bandicoot (Mainland),Endangered,Peramelidae,1,70,20,10,0,0,0,10,1,2,G
+88021,Bettongia lesueur Barrow and Boodie Islands subspecies,"Boodie, Burrowing Bettong (Barrow and Boodie Islands)",Vulnerable,Potoroidae,1,0,0,100,0,0,30,70,2,2,G
+66645,Potorous tridactylus tridactylus,Long-nosed Potoroo (northern),Vulnerable,Potoroidae,1,20,0,80,0,0,0,80,2,2,G
+66651,Perameles gunnii gunnii,Eastern Barred Bandicoot (Tasmania),Vulnerable,Peramelidae,1,70,20,10,0,0,0,10,1,2,G
+88217,Antechinus arktos,Black-tailed Antechinus,Endangered,Dasyuridae,2,100,0,0,0,0,0,0,1,3,G
+88218,Antechinus argentus,Silver-headed Antechinus,Endangered,Dasyuridae,2,100,0,0,0,0,0,0,1,3,G
+88019,Lagorchestes hirsutus Central Australian subspecies,"Mala, Rufous Hare-Wallaby (Central Australia)",Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+88453,Phascogale tapoatafa kimberleyensis,"Kimberley brush-tailed phascogale, Brush-tailed Phascogale (Kimberley)",Vulnerable,Dasyuridae,1,30,70,0,0,0,0,0,3,2,Ar
+86568,Crocidura trichura,Christmas Island Shrew,Critically Endangered,Soricidae,1,100,0,0,0,0,0,0,1,3,G
+82954,Phascogale pirata,Northern Brush-tailed Phascogale,Vulnerable,Dasyuridae,1,80,20,0,0,0,0,0,3,3,Ar
+90831,Petrogale lateralis centralis,"Warru, Central Australian Rock-wallaby",Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+87597,Tachyglossus aculeatus multiaculeatus,Kangaroo Island Echidna,Endangered,Tachyglossidae,1,100,0,0,0,0,0,0,1,3,G
+66646,Petrogale xanthopus xanthopus,Yellow-footed Rock-wallaby (SA and NSW),Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+92008,Petauroides minor,"Greater Glider (northern), Greater Glider (north-eastern Queensland)",Vulnerable,Pseudocheiridae,2,0,0,100,0,0,0,100,1,1,Ar
+66664,Lagostrophus fasciatus fasciatus,"Banded Hare-wallaby, Merrnine, Marnine, Munning",Vulnerable,Macropodidae,1,0,0,100,50,0,0,50,2,1,G
+66665,Isoodon auratus auratus,Golden Bandicoot (mainland),Vulnerable,Peramelidae,1,100,0,0,0,0,0,0,1,3,G
+88022,Petaurus australis Wet Tropics subspecies,"Yellow-bellied Glider (Wet Tropics), Fluffy Glider",Endangered,Petauridae,2,25,0,75,0,30,20,25,3,2,Ar
+89289,Notamacropus parma,Parma Wallaby,Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+66647,Petrogale lateralis lateralis,"Black-flanked Rock-wallaby, Moororong, Black-footed Rock Wallaby",Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+66663,Lagorchestes hirsutus dorreae,Rufous Hare-wallaby (Dorre Island),Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+66666,Isoodon auratus barrowensis,Golden Bandicoot (Barrow Island),Vulnerable,Peramelidae,1,100,0,0,0,0,0,0,1,3,G
+66667,Isoodon obesulus nauticus,Southern Brown Bandicoot (Nuyts Archipelago),Vulnerable,Peramelidae,1,100,0,0,0,0,0,0,1,3,G
+85104,"Phascolarctos cinereus (combined populations of Qld, NSW and the ACT)","Koala (combined populations of Queensland, New South Wales and the Australian Capital Territory)",Endangered,Phascolarctidae,2,0,0,100,0,0,0,100,1,1,Ar
+68050,Isoodon obesulus obesulus,"Southern Brown Bandicoot (eastern), Southern Brown Bandicoot (south-eastern)",Endangered,Peramelidae,1,100,0,0,0,0,0,0,1,3,G
+89262,Osphranter robustus isabellinus,"Barrow Island Wallaroo, Barrow Island Euro",Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+64475,Dasyurus maculatus gracilis,"Spotted-tailed Quoll (North Queensland), Yarri",Endangered,Dasyuridae,2,30,70,0,0,0,0,0,2,2,G
+82790,Rhinonicteris aurantia (Pilbara form),Pilbara Leaf-nosed Bat,Vulnerable,Rhinonycteridae,2,100,0,0,0,0,0,0,1,3,A
+26775,Petaurus gracilis,Mahogany Glider,Endangered,Petauridae,2,20,0,80,0,40,20,20,3,1,Ar
+83086,Antechinus minimus maritimus,Swamp Antechinus (mainland),Vulnerable,Dasyuridae,1,90,10,0,0,0,0,0,1,3,G
+87605,Petrogale concinna concinna,Nabarlek (Victoria River District),Critically Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+86675,Hipposideros inornatus,Arnhem Leaf-nosed Bat,Endangered,Hipposideridae,2,100,0,0,0,0,0,0,1,3,A
+75183,Dasyurus maculatus maculatus (Tasmanian population),"Spotted-tail Quoll, Spot-tailed Quoll, Tiger Quoll (Tasmanian population)",Vulnerable,Dasyuridae,2,30,70,0,0,0,0,0,2,2,G
+75184,Dasyurus maculatus maculatus (SE mainland population),"Spot-tailed Quoll, Spotted-tail Quoll, Tiger Quoll (southeastern mainland population)",Endangered,Dasyuridae,2,30,70,0,0,0,0,0,2,2,G
+66889,Saccolaimus saccolaimus nudicluniatus,"Bare-rumped Sheath-tailed Bat, Bare-rumped Sheathtail Bat",Vulnerable,Emballonuridae,2,100,0,0,0,0,0,0,1,3,A
+83395,Nyctophilus corbeni,"Corben's Long-eared Bat, South-eastern Long-eared Bat",Vulnerable,Vespertilionidae,2,100,0,0,0,0,0,0,1,3,A
+83091,Trichosurus vulpecula arnhemensis,Northern Brushtail Possum,Vulnerable,Phalangeridae,2,0,0,100,20,0,13.333,66.667,3,2,Ar
+25906,Zyzomys maini,"Arnhem Rock-rat, Arnhem Land Rock-rat, Kodjperr",Vulnerable,Muridae,1,10,0,90,0,0,0,90,1,1,G
+25907,Zyzomys palatalis,"Carpentarian Rock-rat, Aywalirroomoo",Endangered,Muridae,1,10,0,90,0,0,0,90,1,1,G
+66662,Lagorchestes hirsutus bernieri,Rufous Hare-wallaby (Bernier Island),Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+66849,Petrogale lateralis hacketti,Recherche Rock-wallaby,Vulnerable,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+25911,Pseudocheirus occidentalis,"Western Ringtail Possum, Ngwayir, Womp, Woder, Ngoor, Ngoolangit",Critically Endangered,Pseudocheiridae,2,0,0,100,20,10,0,70,2,1,Ar
+90832,Petrogale lateralis kimberleyensis,"Wiliji, West Kimberley Rock-wallaby",Endangered,Macropodidae,1,0,0,100,0,0,0,100,1,1,G
+66844,Bettongia penicillata ogilbyi,Woylie,Endangered,Potoroidae,1,0,0,100,0,0,30,70,2,2,G
+92894,Sminthopsis fuliginosa aitkeni,Kangaroo Island Dunnart,Endangered,Dasyuridae,1,80,20,0,0,0,0,0,1,3,G
