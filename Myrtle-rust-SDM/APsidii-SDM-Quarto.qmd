@@ -1,0 +1,436 @@
+---
+title: "APsidii SDM Quarto doc"
+format: html
+editor: visual
+---
+
+```{r}
+#| echo: false
+library(sp)
+library(raster)
+library(sf)
+library(dismo)
+library(galah)
+library(CoordinateCleaner)
+library(terra)
+library(geodata)
+library(ggplot2)
+library(rnaturalearth)
+library(dplyr)
+library(ggspatial)
+library(tidyverse)
+library(PresenceAbsence)
+```
+
+## Occurrence Data
+
+```{r}
+#| echo: false
+
+# Sign in using ALA email
+galah_config(email = "yourname@email.com")
+
+# Get occurences from ALA
+occ <- galah_call() |>
+  galah_identify("Austropuccinia psidii") |>
+  galah_filter(year >= 2010,
+               basisOfRecord == c("HumanObservation","Occurrence"),
+               country == "Australia",
+               profile = "ALA") |>
+  galah_select(
+    "recordID",
+    "dataResourceName",
+    "scientificName",
+    "decimalLatitude",
+    "decimalLongitude",
+    "country",
+    "eventDate",
+    "basisOfRecord",
+    "individualCount",
+    "coordinateUncertaintyInMeters",
+    "institutionCode",
+    "collectionCode"
+  ) |>
+  atlas_occurrences(mint_doi = TRUE)
+
+# See DOI
+attr(occ, "doi")
+
+# Generate citation
+citation <- atlas_citation(occ)
+
+write.csv(occ, "data/raw/APsidii_ALA_250929.csv")
+occ <- read.csv("data/raw/APsidii_ALA_250729.csv")
+
+# Clean and analyse occurrences -------------------------------------------
+
+# Flag occurrences with CoordinateCleaner
+occ_cleaner <- clean_coordinates(
+  x = occ,
+  lon = "decimalLongitude",
+  lat = "decimalLatitude",
+  species = "scientificName",
+  tests = c("centroids", "equal", "institutions", "zeros", "capitals", "duplicates")
+)
+
+# View flagged results
+table(occ_cleaner$.summary)
+
+# Create a new object with only unflagged occurrences
+occ_clean <- occ_cleaner %>% 
+  filter(.summary == TRUE)
+write.csv(occ_clean, "data/processed/APsidii_ALA_250729_cleaned.csv")
+occ_clean <- read.csv("data/processed/APsidii_ALA_250729_cleaned.csv")
+
+# Analyse coordinate uncertainty
+summary(occ_clean$coordinateUncertaintyInMeters)
+
+coord_unc <- occ_clean |>
+  dplyr::select(dataResourceName, coordinateUncertaintyInMeters) |>
+  filter(is.na(coordinateUncertaintyInMeters))
+
+# Density plot of coordinate uncertainty
+ggplot(occ_clean, aes(x = coordinateUncertaintyInMeters)) +
+  geom_density(fill = "lightgreen", alpha = 0.6) +
+  geom_vline(xintercept = c(9000, 4500, 1000), linetype = "dashed", color = c("red", "orange", "green")) +
+  annotate("text", x = 9000, y = 0, label = "9 km", color = "red", angle = 90, vjust = -0.5, hjust = -5) +
+  annotate("text", x = 4500, y = 0, label = "4.5 km", color = "orange", angle = 90, vjust = -0.5, hjust = -5) +
+  annotate("text", x = 1000, y = 0, label = "1 km", color = "green", angle = 90, vjust = -0.5, hjust = -5) +
+  scale_x_continuous(trans = "log10") +
+  labs(
+    x = expression("Coordinate Uncertainty (log"[10] ~ "m)")
+  ) +
+  theme_minimal() +
+  theme(axis.title.y = element_blank())
+
+# Define thresholds for uncertainty in meters
+threshold_5min <- 9000    # ~9 km for 5 minutes
+threshold_2_5min <- 4500  # ~4.5 km for 2.5 minutes
+threshold_30sec <- 1000  # ~1 km for 30 seconds
+
+# Calculate proportions
+total_records <- nrow(occ_clean)
+
+prop_below_5min <- mean(occ_clean$coordinateUncertaintyInMeters <= threshold_5min, na.rm = TRUE)
+prop_below_2_5min <- mean(occ_clean$coordinateUncertaintyInMeters <= threshold_2_5min, na.rm = TRUE)
+prop_below_30sec <- mean(occ_clean$coordinateUncertaintyInMeters <= threshold_30sec, na.rm = TRUE)
+
+# Filter datasets by thresholds
+occ_2_5min <- occ_clean |>
+  filter(coordinateUncertaintyInMeters <= threshold_2_5min | is.na(coordinateUncertaintyInMeters))
+occ_30sec <- occ_clean |>
+  filter(coordinateUncertaintyInMeters <= threshold_30sec | is.na(coordinateUncertaintyInMeters))
+
+## Create coordinate only data
+# 2.5-minute resolution (≤ 4.5 km uncertainty)
+occ_2_5min_coords <- occ_2_5min %>%
+  select(decimalLongitude, decimalLatitude)
+# 30-second resolution (≤ 1 km uncertainty)
+occ_30sec_coords <- occ_30sec %>%
+  select(decimalLongitude, decimalLatitude)
+
+## Create an object for both as df
+# Converting 2.5minute res to dataframe
+occ_2_5min_df <- as.data.frame(occ_2_5min_coords)
+write.csv(occ_2_5min_df, "data/processed/APsidii_ALA_2_5min_df.csv", row.names = FALSE)
+# Converting 30second res to dataframe
+occ_30sec_df <- as.data.frame(occ_30sec_coords)
+write.csv(occ_30sec_df, "data/processed/APsidii_ALA_30sec_df.csv", row.names = FALSE)
+occ_30sec_df <- read.csv("data/processed/APsidii_ALA_30sec_df.csv")
+
+## Make them spatial data for mapping
+# Converting 2.5minute res to spatial object
+occ_2_5min_sf <- st_as_sf(occ_2_5min_coords, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+# Converting 30second res to spatial object
+occ_30sec_sf <- st_as_sf(occ_30sec_coords, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+```
+
+### Visualisation
+
+```{r}
+# load in aus shp - STATES AND TERRITORIES AVAILABLE HERE: https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs-edition-3/jul2021-jun2026/access-and-downloads/digital-boundary-files#downloads-for-gda2020-digital-boundary-files
+aus_states <- st_read("~/Library/CloudStorage/OneDrive-TheUniversityofMelbourne/R Projects/Susceptibility mapping/data/spatial/STE_2021_AUST_GDA2020.shp")
+# in albers
+states_alb <- st_transform(aus_states, crs = "EPSG:3577")
+# drop islands
+states_alb <- st_crop(states_alb,       
+                    xmin = -1.95e6, xmax = 2.5e6,
+                    ymin = -5e6, ymax = -1e6)
+
+# occurence as shape
+occurrence_sf <- st_as_sf(occ_30sec_df, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+# in albers equal area
+occ_30sec_alb <- st_transform(occurrence_sf, crs = "EPSG:3577")
+
+# Spatial join: assign each occurrence to its state
+occ_in_states <- st_join(occ_30sec_alb, states_alb)
+
+# Summarise counts and percentages
+occ_count_by_state <- occ_in_states |>
+  st_drop_geometry() |>
+  count(STE_NAME21, name = "n_occurrences") |>
+  mutate(perc_total = round(100 * n_occurrences / sum(n_occurrences), 1)) |>
+  arrange(desc(n_occurrences))
+
+# View results
+print(occ_count_by_state)
+
+# plotting
+occ_map <- ggplot() +
+  geom_sf(data = states_alb, fill = "grey") +  # Add the shapefile as a base layer
+  geom_sf(data = occ_30sec_alb, color = "red", size = 1) + # Add occurrence points
+  labs(title = "Occurrence Data Used in MaxEnt model") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() # Optional: customize the plot theme
+occ_map
+```
+
+## Setting up Predictor Variables
+
+```{r}
+#| echo: false
+# 30s bioclim for aus
+bioAUS <- worldclim_country("Australia", var = "bio", path = "data/raw")
+bioAUS <- rast("data/raw/climate/wc2.1_country/AUS_wc2.1_30s_bio.tif")
+
+# 30s for aus
+sradAUS <- worldclim_country("Australia", var = "srad", path = "data/raw")
+
+# Forest data for AUS
+# Available here: https://www.agriculture.gov.au/abares/forestsaustralia/forest-data-maps-and-tools/spatial-data/forest-cover
+forAUS <- rast("data/raw/Forest data/aus_for23.tif")
+
+# Reproject to WGS 84
+forAUS_wgs84 <- project(forAUS, "EPSG:4326")
+cats(forAUS_wgs84)
+
+writeRaster(forAUS_wgs84, "data/processed/Forest data/forestcovercode.tif", overwrite = TRUE)
+forAUS_wgs84 <- rast("data/processed/Forest data/forestcovercode.tif")
+
+# Getting the distance from initial incursion
+# Using Australian LGA data can get LGA from central coast as there is no specific point data
+# LGA available at: https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs-edition-3/jul2021-jun2026/access-and-downloads/digital-boundary-files#downloads-for-gda2020-digital-boundary-files
+LGAs <- st_read("data/raw/LGA_2025_AUST_GDA2020")
+# Reproject to wgs84
+LGAs_wgs84 <- st_transform(LGAs, "EPSG:4326")
+# Select only central coast LGA
+central_coast <- LGAs_wgs84 %>%
+  filter(LGA_NAME25 == "Central Coast (NSW)") %>%
+  select(AREASQKM)
+
+
+# Make a sample raster for the distance
+sample_raster <- rast(nrows = nrow(bioAUS),
+                      ncols = ncol(bioAUS),
+                      extent = ext(bioAUS),
+                      crs = crs(bioAUS))
+
+# Rasterize central coast polygon
+CentCoast_raster <- rasterize(central_coast, bioAUS, field = 1)
+writeRaster(CentCoast_raster, "data/processed/centralcoastraster.tif", overwrite=TRUE)
+# Create the distance from initial incursion area raster
+dist_frm_initial <- distance(CentCoast_raster, unit = "km")
+writeRaster(dist_frm_initial, "data/processed/distfromincurs.tif")
+dist_frm_initial <- rast("data/processed/distfromincurs.tif")
+dist_frm_initial_m <- mask(dist_frm_initial, bioAUS[[1]])
+names(dist_frm_initial_m) <- "Distance (km)"
+writeRaster(dist_frm_initial_m, "data/processed/distfromincurs_masked.tif")
+dist_frm_initial_m <- rast("data/processed/distfromincurs_masked.tif")
+
+# Ensure all environmental variable rasters are "rasters" not "SpatRasters"
+bioAUS_r <- raster::stack(bioAUS)
+
+# Make a bioclim thing like the berthon et al. paper
+bio_berthon <- bioAUS[[c(4,5,12,13,15)]]
+bio_berthon_r <- rast(bio_berthon)
+
+# Find annual sum of mean solar rad
+srad_ann_sum <- app(sradAUS, fun = sum, na.rm = TRUE)
+writeRaster(srad_ann_sum, "data/processed/Climate data/annual_sum_srad.tif", overwrite=TRUE)
+srad_ann_sum <- rast("data/processed/Climate data/annual_sum_srad.tif")
+
+# Forest cover
+forAUS_wgs84_r <- rast("data/processed/Forest data/forestcovercode.tif")
+
+# Running MaxEnt and evaluating outputs -----------------------------------
+
+# Resample forest cover to the coarser resolutions of other rasters
+forAUS_resampled <- resample(forAUS_wgs84_r, bioAUS, method = "near")
+writeRaster(forAUS_resampled, "data/processed/Forest data/forAUS_resampled.tif", overwrite=TRUE)
+forAUS_resampled <- rast("data/processed/Forest data/forAUS_resampled.tif")
+
+rat2 <- levels(forAUS_resampled)[[1]]
+rcl2 <- as.matrix(rat2[, c("ID", "COVER_CODE")])
+cc_only_re <- classify(forAUS_resampled, rcl2)
+cc_only_re <- as.factor(cc_only_re)
+writeRaster(cc_only_re, "data/processed/Forest data/forAUS_covercodeonly_resampled.tif")
+cc_only_re <- rast("data/processed/Forest data/forAUS_covercodeonly_resampled.tif")
+
+# Convert terra SpatRaster to raster RasterLayer or RasterStack
+cc_only_re_r <- raster(cc_only_re)
+#bioAUS_r <- raster(bioAUS)
+srad_ann_sum_r <- raster(srad_ann_sum)
+
+# Stack rasters for MaxEnt input
+env_rasts <- c(cc_only_re, bio_berthon, srad_ann_sum, dist_frm_initial_m)
+env_rasts_r <- stack(env_rasts)
+
+
+# Load in
+bioAUS <- rast("data/raw/climate/wc2.1_country/AUS_wc2.1_30s_bio.tif")
+
+dist_frm_initial_m <- rast("data/processed/distfromincurs_masked.tif")
+
+cc_only_re <- rast("data/processed/Forest data/forAUS_covercodeonly_resampled.tif")
+
+srad_ann_sum <- rast("data/processed/Climate data/annual_sum_srad.tif")
+
+bio_berthon <- bioAUS[[c(4,5,12,13,15)]]
+
+env_rasts <- c(cc_only_re, dist_frm_initial_m, srad_ann_sum, bio_berthon)
+
+env_rasts_r <- stack(env_rasts)
+
+
+```
+
+## Maxent Modelling
+
+```{r}
+#| echo: false
+set.seed(42)
+bg <- randomPoints(env_rasts_r, n=10000)
+
+# CHANGE THIS TO YOUR MAXENT PATH
+maxent_path <- "~your/path/to/maxent/maxent.jar"
+
+# Cross-validation for checking
+
+five_model <- maxent(x = env_rasts_r, 
+                p = occ_30sec_df, 
+                a = bg, 
+                factors = c("COVER_CODE"), 
+                path = "outputs/data/maxent_output_fivefold", 
+                args = c("-J", "-P", "product=false", "replicates=5", "hinge=false", "threshold=false"), 
+                progpath = maxent_path)
+
+# Final model
+model <- maxent(x = env_rasts_r, 
+                p = occ_30sec_df, 
+                a = bg, 
+                factors = c("COVER_CODE"), 
+                path = "outputs/data/maxent_output_final", 
+                args = c("-J", "-P", "product=false", "randomtestpoints=25", "replicates=1", "hinge=false", "threshold=false"), 
+                progpath = maxent_path)
+
+# Run prediction
+pred <- predict(model, env_rasts_r)
+
+writeRaster(pred, filename = "outputs/data/Predictions/maxent_prediction.tif")
+```
+
+### Visualising model
+
+```{r}
+pred <- rast("outputs/data/Predictions/maxent_prediction.tif")
+pred_alb <- project(pred, "EPSG:3577")
+
+# crop to the states shapefile
+pred_alb_crop <- crop(pred_alb, states_alb)
+
+# As a dataframe for gg
+pred_df <- as.data.frame(pred_alb_crop, xy = TRUE)
+colnames(pred_df) <- c("x", "y", "suitability")
+
+# simplifying state lines
+states_simplified <- st_simplify(states_alb, dTolerance = 1000)
+
+# plot using gg
+suit_map <- ggplot() +
+  geom_raster(data = pred_df, aes(x, y, fill = suitability)) +
+  geom_sf(data = states_simplified, fill = NA, colour = "grey30", linewidth = 0.1, lineend = "round", linejoin = "round") +
+  scale_fill_viridis_c(
+    option = "inferno",
+    direction = -1,
+    values = scales::rescale(c(0, 0.05, 0.20, 0.50, 0.70, 1.00)),
+    name = "Environmental\nsuitability"
+  ) +
+  coord_sf(expand = TRUE) +
+  annotation_north_arrow(
+  location = "tr",
+  which_north = "true",
+  style = north_arrow_fancy_orienteering(
+    text_size = 8,          # label font size (“N”)
+    line_width = 1,         # thickness of arrow lines
+    fill = c("grey40", "white")  # colors for arrow halves
+  ),
+  height = unit(1.5, "cm"),  # ⬅ increase arrow height
+  width  = unit(1.5, "cm")   # ⬅ increase arrow width
+) +
+   theme_minimal(base_size = 14) +  # ⬅ increases base font size for entire plot
+  theme(
+    axis.title = element_blank(),
+    legend.title = element_text(size = 14),   # ⬅ legend title font
+    legend.text  = element_text(size = 12),   # ⬅ legend labels font
+    legend.key.height = unit(1.5, "cm"),      # ⬅ make colorbar taller
+    legend.key.width  = unit(1.0, "cm")       # ⬅ make colorbar wider
+  ) +
+  guides(fill = guide_colorbar(
+    barwidth = 1.2,  # adjust width
+    barheight = 8,   # adjust height (in cm)
+    title.position = "top"  # optional: move title above bar
+  ))
+suit_map
+```
+
+### TSS and Cohen's kappa
+
+```{r}
+
+# evaluating the model
+eval_obj <- evaluate(p = occ_30sec_df, 
+                     a = bg, 
+                     model = model, 
+                     x = env_rasts_r)
+
+# Prepare coordinates
+occ_coords <- occ_30sec_df[, c("decimalLongitude", "decimalLatitude")]
+names(occ_coords) <- c("x", "y")
+
+
+# Extract predicted probabilities
+pred_occ <- raster::extract(pred, occ_coords)
+pred_bg <- raster::extract(pred, bg)
+
+# Combine into a single presence/absence dataframe
+df_pa <- data.frame(
+  obs = c(rep(1, length(pred_occ)), rep(0, length(pred_bg))),  # 1 = presence, 0 = background
+  pred = c(pred_occ, pred_bg)  # predicted probability from raster
+)
+
+# Determine TSS-maximizing threshold
+eval_obj <- evaluate(p = occ_coords, a = bg, model = model, x = env_rasts_r)
+tss_threshold <- threshold(eval_obj, "spec_sens")
+
+# Convert probabilities to binary using threshold
+df_pa$pred_bin <- ifelse(df_pa$pred >= tss_threshold, 1, 0)
+
+# Build confusion matrix manually
+conf_matrix <- table(Observed = df_pa$obs, Predicted = df_pa$pred_bin)
+conf_matrix
+# Should have exactly 2 rows (obs 0/1) and 2 columns (pred 0/1)
+
+# Calculate TSS
+sens <- conf_matrix[2,2] / sum(conf_matrix[2,])  # TP / (TP + FN)
+spec <- conf_matrix[1,1] / sum(conf_matrix[1,])  # TN / (TN + FP)
+TSS <- sens + spec - 1
+TSS
+
+# Calculate Cohen's Kappa
+kappa_val <- Kappa(conf_matrix)
+kappa_val
+
+```
+
+\
